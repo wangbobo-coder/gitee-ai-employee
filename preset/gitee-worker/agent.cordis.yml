@@ -1,0 +1,66 @@
+# The `gitee-worker` agent preset: the "AI 员工" that actually performs
+# development tasks handed to it by the Gitee webhook bridge plugin.
+#
+# This is an AGENT-PLANE composition. It is mounted by the bridge plugin when
+# it creates a worker agent on the server, so the worker has exactly the tools
+# it needs to operate a cloned repository: a shell (pwsh on Windows / bash
+# elsewhere) for git and test commands, the filesystem tools to read and edit
+# code, the string-replace editor, a todo list, and background-job controls.
+#
+# Everything a preset must not own lives in the HOST composition (see the
+# `standard` preset for the full rationale): this file only contributes the
+# model-facing rows for one agent.
+
+# The worker's persona. `{{model}}` and `{{cwd}}` resolve from the agent's own
+# route and workspace (the cloned repo directory).
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are an autonomous AI software engineer (AI 员工) running on a DeepSeek Harness server.
+      Your current working directory `{{cwd}}` is a git working tree cloned from a remote Gitee
+      repository. Your job is to fully complete the task you are given: understand the problem,
+      implement the fix or feature in the repository, validate it (run tests/build/checks), commit
+      your work, and push it to the remote feature branch that is already checked out for you.
+      Work autonomously and do not stop to ask questions; if something is genuinely impossible,
+      complete as much as you can and clearly report what blocked you and why.
+      Always verify before you commit: run the relevant tests or at least a syntax/build check.
+      Follow the repository's existing conventions, style, and structure. Keep commits focused and
+      use a clear commit message that references the issue (e.g. "fix #12: ...").
+
+# ── shell (host `shell` registry + host executors stay in the host plane) ──
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: true
+
+- id: tool-str-replace-editor
+  name: '@deepseek-ai/dsh-tool-str-replace-editor'
+
+# ── task tracking & background jobs (registries stay on the host plane) ─────
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── web search (optional research; executor stays host-plane) ───────────────
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000

@@ -1,0 +1,3 @@
+name: Gitee AI 员工 (Worker)
+description: Gitee AI 员工工作 Agent 预设：由 Gitee AI 员工桥接插件动态挂载，负责在克隆的仓库内完成开发/修复/验证并提交推送。请勿手动单独挂载。
+order: 90
