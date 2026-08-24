@@ -13,7 +13,7 @@ Gitee 与 GitHub 仓库可以同时监听。
 - **AI 开发**：创建 worker agent（Windows 下经 PowerShell + curl 克隆仓库），探索代码、
   实现需求、跑校验、在 `ai-fix/issue-<number>` 分支上提交。
 - **分支感知**：会读取 issue 里用自然语言指定的分支，作为开发基准和 PR 目标：
-  - `需要修改 master-sctbc 分支` / `修改 X 分支` / `改 X 分支`
+  - `需要修改 release-v1.2 分支` / `修改 X 分支` / `改 X 分支`
   - `基于 X 分支` / `在 X 分支上` / `以 X 分支为基础`
   - `合并到 X` / `合到 X` / `目标分支 X` / `base: X`
   指定分支会用 `git ls-remote` 校验远端存在性；不存在则退回仓库默认分支并在评论中说明。
@@ -57,7 +57,7 @@ dsh plugin --profile <你的-profile> add gitee-ai-employee
 2. 在监听的仓库里新建/编辑 issue 并 @ 机器人：
    ```
    @gitee-ai
-   需要修改 master-sctbc 分支
+   需要修改 release-v1.2 分支
    参会人员选择增加学生选项，注意回显处理。
    ```
 3. 插件会在一个轮询周期内接单（评论“已接单”），运行 worker，最后回帖结果与 PR 链接；

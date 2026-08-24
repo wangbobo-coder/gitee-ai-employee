@@ -20,7 +20,7 @@ GitHub repositories at the same time.
   commits on a `ai-fix/issue-<number>` branch.
 - **Branch-aware**: it reads branch instructions written in natural language and uses that
   branch as both the development base and the PR target:
-  - `需要修改 master-sctbc 分支` / `修改 X 分支` / `改 X 分支`
+  - `需要修改 release-v1.2 分支` / `修改 X 分支` / `改 X 分支`
   - `基于 X 分支` / `在 X 分支上` / `以 X 分支为基础`
   - `合并到 X` / `合到 X` / `目标分支 X` / `base: X`
   The requested branch is validated against the remote with `git ls-remote`; if it does not
@@ -67,7 +67,7 @@ Restart dsh, then open **Settings → Plugins → Plugin configuration**, find t
 2. Open (or edit) an issue in a watched repo and mention your bot:
    ```
    @gitee-ai
-   需要修改 master-sctbc 分支
+   需要修改 release-v1.2 分支
    参会人员选择增加学生选项，注意回显处理。
    ```
 3. The plugin picks it up (usually within one poll interval), comments "已接单", runs the
