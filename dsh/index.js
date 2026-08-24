@@ -261,7 +261,7 @@ export default {
       const base = `/repos/${owner}/${repo}`;
       return {
         getIssue: (n) => apiFetch(p, "GET", `${base}/issues/${encodeURIComponent(n)}`),
-        listOpenIssues: () => apiFetch(p, "GET", `${base}/issues?state=open&per_page=50${gh ? "&type=issues" : ""}`),
+        listOpenIssues: () => apiFetch(p, "GET", `${base}/issues?state=open&per_page=50`),
         addComment: (n, bodyText) => apiFetch(p, "POST", `${base}/issues/${encodeURIComponent(n)}/comments`, { body: bodyText }),
         createPr: (data) => apiFetch(p, "POST", `${base}/pulls`, data),
         mergePr: (n) => apiFetch(p, "PUT", `${base}/pulls/${encodeURIComponent(n)}/merge`, { merge_method: "merge" }),
