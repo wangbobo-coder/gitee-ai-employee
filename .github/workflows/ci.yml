@@ -1,0 +1,20 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Node syntax check
+        run: node --check dsh/index.js && node --check dsh/client.js
+      - name: Validate package.json
+        run: node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package.json ok')"
+      - name: Validate YAML files
+        run: node -e "const y=require('fs').readFileSync('cordis.patch.yml','utf8'); if(!y.includes('gitee-ai-employee')) process.exit(1); console.log('cordis.patch.yml ok')"
