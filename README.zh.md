@@ -1,13 +1,15 @@
 # Gitee AI 员工 (gitee-ai-employee)
 
-面向 **DeepSeek Harness** 的 issue 驱动型 AI 开发者，对接 **Gitee（码云）**。
+面向 **DeepSeek Harness** 的 issue 驱动型 AI 开发者，支持 **Gitee（码云）** 与 **GitHub**。
 
-在 Gitee issue 里 @ 你的机器人，插件就会克隆仓库、派出 AI **worker agent** 实现改动、
+在 issue 里 @ 你的机器人，插件就会克隆仓库、派出 AI **worker agent** 实现改动、
 推送分支、按你指定的分支创建 Pull Request，并可按需自动合并、自动关闭 issue。
+Gitee 与 GitHub 仓库可以同时监听。
 
 ## 功能
 
-- **轮询**：定时扫描你监听的仓库里新出现 `@botName` 的 issue。
+- **轮询**：定时扫描你监听的仓库里新出现 `@botName` 的 issue。**双平台**：每个监听行可加
+  `gitee:` / `github:` 前缀（无前缀按 `defaultPlatform`，默认 gitee），两种平台可混用。
 - **AI 开发**：创建 worker agent（Windows 下经 PowerShell + curl 克隆仓库），探索代码、
   实现需求、跑校验、在 `ai-fix/issue-<number>` 分支上提交。
 - **分支感知**：会读取 issue 里用自然语言指定的分支，作为开发基准和 PR 目标：
@@ -39,9 +41,11 @@ dsh plugin --profile <你的-profile> add gitee-ai-employee
 | 配置项 | 说明 |
 | --- | --- |
 | `giteeToken` | Gitee 个人访问令牌（标记为 secret，状态接口不回显） |
+| `githubToken` | GitHub 个人访问令牌，可选（标记为 secret；仅当监听 `github:` 仓库时必填） |
+| `defaultPlatform` | 无前缀 watchRepos 行所属平台：`gitee`（默认）或 `github` |
 | `botName` | 触发机器人的账号，如 `gitee-ai`。建议使用 ASCII 名称。 |
 | `workRoot` | 仓库克隆目录；留空 = `$DSH_HOME/gitee-workers` |
-| `watchRepos` | 监听仓库，每行一个 `owner/repo` |
+| `watchRepos` | 监听仓库，每行一个：`owner/repo`（按 defaultPlatform）或 `gitee:owner/repo` / `github:owner/repo` |
 | `pollEnabled` / `pollIntervalMs` | 是否轮询 / 轮询间隔（毫秒） |
 | `autoMerge` | 是否自动合并创建的 PR |
 | `autoCloseIssue` | 任务成功后是否自动关闭 issue |
@@ -58,6 +62,13 @@ dsh plugin --profile <你的-profile> add gitee-ai-employee
    ```
 3. 插件会在一个轮询周期内接单（评论“已接单”），运行 worker，最后回帖结果与 PR 链接；
    开启 `autoCloseIssue` 时成功后自动关闭 issue。
+
+GitHub 同理：配置 `githubToken` 后在 `watchRepos` 里写 `github:owner/repo`（或把
+`defaultPlatform` 设为 `github`）。也可以直接手动触发单个任务：
+
+```
+http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&number=5
+```
 
 > 机器人匹配使用前瞻断言（`(?![A-Za-z0-9_])`），ASCII 与中文 botName 都能正确触发。
 

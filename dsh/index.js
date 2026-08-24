@@ -2,9 +2,11 @@
 // Gitee AI 员工 (gitee-ai-employee) —— 标准 Cordis bundle 插件（host 半边）
 // ----------------------------------------------------------------------------
 // 以标准 bundle 组合包形式承载，可通过 dsh plugin add 安装：
-//   轮询 @botName 的 Gitee issue → 派发 worker agent 在克隆的仓库里开发 →
-//   推送分支 → 创建 PR → 自动合并（若允许）→ 自动关闭 issue。
+//   轮询 @botName 的 Gitee / GitHub issue → 派发 worker agent 在克隆的仓库里
+//   开发 → 推送分支 → 创建 PR → 自动合并（若允许）→ 自动关闭 issue。
 //   支持「基于/修改 X 分支」等自然语言指定目标分支（PR 打到指定分支）。
+//   watchRepos 每行可带平台前缀：[gitee:|github:]owner/repo，无前缀按
+//   config.defaultPlatform（默认 gitee）判定；两平台可混用。
 //
 // 分发形态：公开 npm 包 + GitHub 仓库（wangbobo-coder/gitee-ai-employee）。
 // 配置来自 patch 行的 config 字段；用户配置保存在用户自身 profile/patch 层，
@@ -22,6 +24,7 @@ import { join } from "node:path";
 
 const DEFAULT_CONFIG = {
   giteeToken: "",
+  githubToken: "",
   botName: "dsh-ai-employee",
   webhookPath: "/gitee-ai-webhook",
   webhookSecret: "",
@@ -37,6 +40,8 @@ const DEFAULT_CONFIG = {
   pollEnabled: false,
   pollIntervalMs: 60000,
   watchRepos: [],
+  // watchRepos 无平台前缀的行默认所属平台："gitee" | "github"
+  defaultPlatform: "gitee",
   tmpDir: "",
   gitUser: "",
 };
@@ -46,6 +51,7 @@ const DEFAULT_CONFIG = {
 // 普通类的 apply 永远不会被执行（这是 DSH 动态插件与原生插件的关键差异）。
 const GITEE_CONFIG_SCHEMA = z.object({
     giteeToken: z.string().default(DEFAULT_CONFIG.giteeToken).role("secret"),
+    githubToken: z.string().default(DEFAULT_CONFIG.githubToken).role("secret"),
     botName: z.string().default(DEFAULT_CONFIG.botName),
     webhookPath: z.string().default(DEFAULT_CONFIG.webhookPath),
     webhookSecret: z.string().default(DEFAULT_CONFIG.webhookSecret),
@@ -59,6 +65,7 @@ const GITEE_CONFIG_SCHEMA = z.object({
     pollEnabled: z.boolean().default(DEFAULT_CONFIG.pollEnabled),
     pollIntervalMs: z.number().default(DEFAULT_CONFIG.pollIntervalMs),
     watchRepos: z.array(z.string()).default([]),
+    defaultPlatform: z.string().default(DEFAULT_CONFIG.defaultPlatform),
     tmpDir: z.string().default(DEFAULT_CONFIG.tmpDir),
     gitUser: z.string().default(""),
 });
@@ -165,11 +172,44 @@ export default {
       return out;
     }
 
-    // ── Gitee API：Authorization: token 头认证（企业仓库必需）───
+    // ── 平台 API：Gitee / GitHub，Authorization: token 头认证 ──────────────
+    function platformInfo(platform) {
+      const g = platform === "github";
+      return {
+        base: g ? "https://api.github.com" : "https://gitee.com/api/v5",
+        token: g ? config.githubToken : config.giteeToken,
+      };
+    }
+    function tokenOkFor(platform) {
+      const info = platformInfo(platform);
+      return typeof info.token === "string" && info.token.trim() !== "";
+    }
+    function normPlatform(p) {
+      const s = String(p || "").toLowerCase().trim();
+      return s === "github" ? "github" : "gitee";
+    }
+
+    // watchRepos 行格式："github:owner/repo" / "gitee:owner/repo" / 无前缀按
+    // config.defaultPlatform 判定。
+    function parseRepoSpec(spec) {
+      const s = String(spec || "").trim();
+      let platform = normPlatform(config.defaultPlatform || "gitee");
+      let rest = s;
+      const m = /^(github|gitee):(.+)$/i.exec(s);
+      if (m) { platform = normPlatform(m[1]); rest = m[2].trim(); }
+      const idx = rest ? rest.indexOf("/") : -1;
+      if (idx <= 0 || idx === rest.length - 1) return null;
+      const owner = rest.slice(0, idx).trim();
+      const repo = rest.slice(idx + 1).trim();
+      if (!owner || !repo || /[\s.]/.test(owner) || /[\s\\]/.test(repo)) return null;
+      return { platform, owner, repo };
+    }
+
     let apiSeq = 0;
-    async function giteeApi(method, path, body) {
-      const url = "https://gitee.com/api/v5" + path;
-      const token = config.giteeToken;
+    async function apiFetch(platform, method, path, body) {
+      const info = platformInfo(platform);
+      const url = info.base + path;
+      const token = info.token;
       const stamp = Date.now() + "-" + (++apiSeq);
       const outFile = config.tmpDir + "\\gitee-out-" + stamp + ".json";
       const codeFile = config.tmpDir + "\\gitee-code-" + stamp + ".txt";
@@ -183,7 +223,7 @@ export default {
       }
       const r = await sh(cmd, { timeoutMs: 60000 });
       if (r.exitCode !== 0 && r.exitCode !== null) {
-        throw new Error("gitee api exec failed (" + r.exitCode + "): " + (r.stderr.text || "") + " | " + (r.stdout.text || ""));
+        throw new Error(platform + " api exec failed (" + r.exitCode + "): " + (r.stderr.text || "") + " | " + (r.stdout.text || ""));
       }
       let httpCode = 0;
       try {
@@ -198,45 +238,59 @@ export default {
       try { void sh(`Remove-Item -Force -ErrorAction SilentlyContinue '${outFile}','${codeFile}'`, { timeoutMs: 10000 }); } catch (e) {}
       if (!Number.isFinite(httpCode) || httpCode < 200 || httpCode >= 300) {
         const err = { status: httpCode, body: bodyText };
-        err.message = "gitee api HTTP " + httpCode + " for " + method + " " + path + " | " + bodyText.slice(0, 200);
+        err.message = platform + " api HTTP " + httpCode + " for " + method + " " + path + " | " + bodyText.slice(0, 200);
         throw err;
       }
       if (!bodyText) return null;
       try { return JSON.parse(bodyText); } catch (e) { return { raw: bodyText }; }
     }
 
-    async function giteeApiRaw(method, path, body) {
+    async function apiFetchRaw(platform, method, path, body) {
       try {
-        const data = await giteeApi(method, path, body);
+        const data = await apiFetch(platform, method, path, body);
         return { ok: true, status: 200, data };
       } catch (e) {
         return { ok: false, status: e && e.status, message: String((e && e.message) || e) };
       }
     }
 
-    const gitee = {
-      getIssue: (owner, repo, number) => giteeApi("GET", `/repos/${owner}/${repo}/issues/${encodeURIComponent(number)}`),
-      listOpenIssues: (owner, repo) => giteeApi("GET", `/repos/${owner}/${repo}/issues?state=open&per_page=50`),
-      addComment: (owner, repo, number, bodyText) =>
-        giteeApi("POST", `/repos/${owner}/${repo}/issues/${encodeURIComponent(number)}/comments`, { body: bodyText }),
-      createPr: (owner, repo, data) => giteeApi("POST", `/repos/${owner}/${repo}/pulls`, data),
-      mergePr: (owner, repo, number) =>
-        giteeApi("PUT", `/repos/${owner}/${repo}/pulls/${encodeURIComponent(number)}/merge`, { merge_method: "merge" }),
-      getRepo: (owner, repo) => giteeApi("GET", `/repos/${owner}/${repo}`),
-      getMe: () => giteeApi("GET", "/user"),
-      closeIssue: (owner, repo, number, enterprise) => {
-        const path = enterprise
-          ? `/enterprises/${enterprise}/issues/${encodeURIComponent(number)}`
-          : `/repos/${owner}/${repo}/issues/${encodeURIComponent(number)}`;
-        return giteeApi("PATCH", path, { state: "closed" });
-      },
-    };
+    // 按平台构造仓库级 API 方法集（GitHub 与 Gitee 路径/语义尽量复用）
+    function platformApi(platform, owner, repo) {
+      const p = normPlatform(platform);
+      const gh = p === "github";
+      const base = `/repos/${owner}/${repo}`;
+      return {
+        getIssue: (n) => apiFetch(p, "GET", `${base}/issues/${encodeURIComponent(n)}`),
+        listOpenIssues: () => apiFetch(p, "GET", `${base}/issues?state=open&per_page=50${gh ? "&type=issues" : ""}`),
+        addComment: (n, bodyText) => apiFetch(p, "POST", `${base}/issues/${encodeURIComponent(n)}/comments`, { body: bodyText }),
+        createPr: (data) => apiFetch(p, "POST", `${base}/pulls`, data),
+        mergePr: (n) => apiFetch(p, "PUT", `${base}/pulls/${encodeURIComponent(n)}/merge`, { merge_method: "merge" }),
+        getRepo: () => apiFetch(p, "GET", `${base}`),
+        getMe: () => apiFetch(p, "GET", "/user"),
+        closeIssue: (n, enterprise) => gh
+          ? apiFetch(p, "PATCH", `${base}/issues/${encodeURIComponent(n)}`, { state: "closed" })
+          : apiFetch(p, "PATCH", (enterprise ? `/enterprises/${enterprise}/issues/${encodeURIComponent(n)}` : `${base}/issues/${encodeURIComponent(n)}`), { state: "closed" }),
+        prUrl: (n) => gh ? `https://github.com/${owner}/${repo}/pull/${n}` : `https://gitee.com/${owner}/${repo}/pull/${n}`,
+        hostLabel: () => gh ? "GitHub" : "Gitee",
+      };
+    }
+
+    async function cloneUrlFor(platform, owner, repo) {
+      const p = normPlatform(platform);
+      if (p === "github") {
+        if (!tokenOkFor("github")) throw new Error("github token unavailable");
+        return `https://x-access-token:${config.githubToken}@github.com/${owner}/${repo}.git`;
+      }
+      const user = await ensureGitUser();
+      if (!user) throw new Error("git user unavailable (no token or /user probe failed)");
+      return `https://${user}:${config.giteeToken}@gitee.com/${owner}/${repo}.git`;
+    }
 
     async function ensureGitUser() {
       if (config.gitUser) return config.gitUser;
       if (!tokenOk()) return "";
       try {
-        const me = await gitee.getMe();
+        const me = await apiFetch("gitee", "GET", "/user");
         if (me && me.login) {
           config.gitUser = me.login;
           console.log("[gitee-ai] detected git user: " + config.gitUser);
@@ -249,13 +303,7 @@ export default {
 
     function repoDir(owner, repo) { return config.workRoot + "\\" + owner + "\\" + repo; }
     function shellQuote(v) { return `'${String(v).replace(/'/g, "''")}'`; }
-    async function authUrl(owner, repo) {
-      const user = await ensureGitUser();
-      if (!user) throw new Error("git user unavailable (no token or /user probe failed)");
-      return `https://${user}:${config.giteeToken}@gitee.com/${owner}/${repo}.git`;
-    }
-
-    async function ensureRepo(owner, repo) {
+    async function ensureRepo(platform, owner, repo) {
       const dir = repoDir(owner, repo);
       try {
         const probe = await sh(`if (Test-Path '${dir.replace(/'/g, "''")}\\.git') { 'yes' } else { 'no' }`, { timeoutMs: 15000 });
@@ -266,7 +314,7 @@ export default {
       } catch (e) { /* fallthrough */ }
       const parent = config.workRoot + "\\" + owner;
       await sh(`New-Item -ItemType Directory -Force -Path ${shellQuote(parent)} | Out-Null`, { timeoutMs: 15000 });
-      const url = await authUrl(owner, repo);
+      const url = await cloneUrlFor(platform, owner, repo);
       const r = await sh(`git clone ${shellQuote(url)} ${shellQuote(dir)}`, { timeoutMs: 600000 });
       if (r.exitCode !== 0) {
         throw new Error("git clone failed (" + r.exitCode + "): " + ((r.stderr.text || r.stdout.text || "").slice(0, 500)));
@@ -375,10 +423,12 @@ export default {
       }
     }
 
-    async function processIssue(owner, repo, number, issue, triggerComment) {
+    async function processIssue(platform, owner, repo, number, issue, triggerComment) {
+      const p = normPlatform(platform);
+      const api = platformApi(p, owner, repo);
       const key = owner + "/" + repo + "#" + number;
-      if (!tokenOk()) {
-        console.log("[gitee-ai] skip: token not configured");
+      if (!tokenOkFor(p)) {
+        console.log("[gitee-ai] skip: " + p + " token not configured");
         return { skipped: "no-token" };
       }
       if (active.has(key)) return { skipped: "busy" };
@@ -389,15 +439,15 @@ export default {
         title: (issue && issue.title) || "", createdAt: Date.now(), updatedAt: Date.now(), detail: "", prUrl: "",
       };
       jobs.set(key, job);
-      console.log("[gitee-ai] task received: " + key);
+      console.log("[gitee-ai] task received (" + p + "): " + key);
       const update = (patch) => { Object.assign(job, patch); job.updatedAt = Date.now(); };
       try {
-        await gitee.addComment(owner, repo, number, `🤖 **AI 员工已接单**：开始处理该 issue。\n任务编号：\`${key}\``).catch(() => {});
+        await api.addComment(number, `🤖 **AI 员工已接单**：开始处理该 issue。\n任务编号：\`${key}\``).catch(() => {});
         update({ status: "running", step: "clone" });
-        const dir = await ensureRepo(owner, repo);
+        const dir = await ensureRepo(p, owner, repo);
         let baseBranch = "master";
         try {
-          const rd = await gitee.getRepo(owner, repo);
+          const rd = await api.getRepo();
           if (rd && rd.default_branch) baseBranch = rd.default_branch;
         } catch (e) { /* keep master */ }
         // ── 按 issue 指示选择基准分支（PR 目标分支）──────────────────
@@ -409,10 +459,10 @@ export default {
           if (exists) {
             console.log("[gitee-ai] base branch per issue: " + requestedBase + " (default was " + baseBranch + ")");
             baseBranch = requestedBase;
-            await gitee.addComment(owner, repo, number, `ℹ️ 已按 issue 要求基于 \`${requestedBase}\` 分支开发，PR 将合并到 \`${requestedBase}\`。`).catch(() => {});
+            await api.addComment(number, `ℹ️ 已按 issue 要求基于 \`${requestedBase}\` 分支开发，PR 将合并到 \`${requestedBase}\`。`).catch(() => {});
           } else {
             console.log("[gitee-ai] requested branch " + requestedBase + " not on remote; keep default " + baseBranch);
-            await gitee.addComment(owner, repo, number, `⚠️ 远端不存在 \`${requestedBase}\` 分支，本次退回默认分支 \`${baseBranch}\`。`).catch(() => {});
+            await api.addComment(number, `⚠️ 远端不存在 \`${requestedBase}\` 分支，本次退回默认分支 \`${baseBranch}\`。`).catch(() => {});
           }
         }
         const branchName = "ai-fix/issue-" + number;
@@ -423,7 +473,7 @@ export default {
 
         const issueBody = ((issue && issue.body) || "").slice(0, 6000);
         const taskText = [
-          `你是 Gitee 仓库 ${owner}/${repo} 的 AI 员工。仓库已克隆到 ${dir}，当前分支是 ${branchName}（基于 origin/${baseBranch}，PR 将合并到 ${baseBranch}）。`,
+          `你是 ${api.hostLabel()} 仓库 ${owner}/${repo} 的 AI 员工。仓库已克隆到 ${dir}，当前分支是 ${branchName}（基于 origin/${baseBranch}，PR 将合并到 ${baseBranch}）。`,
           ``,
           `任务内容（issue #${number}）：`,
           `标题：${(issue && issue.title) || "(无标题)"}`,
@@ -465,15 +515,15 @@ export default {
         let prNumber = null;
         let prUrl = "";
         try {
-          const created = await gitee.createPr(owner, repo, {
+          const created = await api.createPr({
             title: prTitle, head: branchName, base: baseBranch, body: prBody, prune_source_branch: false,
           });
           prNumber = created && created.number;
-          prUrl = (created && created.html_url) || (prNumber ? `https://gitee.com/${owner}/${repo}/pull/${prNumber}` : "");
+          prUrl = (created && created.html_url) || (prNumber ? api.prUrl(prNumber) : "");
         } catch (e) {
           const errText = String((e && e.message) || e);
           if (/already|已存在|exist/i.test(errText)) {
-            const list = await giteeApi("GET", `/repos/${owner}/${repo}/pulls?state=open`).catch(() => null);
+            const list = await apiFetch(p, "GET", `/repos/${owner}/${repo}/pulls?state=open`).catch(() => null);
             const arr = Array.isArray(list) ? list : [];
             const found = arr.find((p) => p.head === branchName || (p.head && p.head.ref) === branchName || p.head === `${owner}:${branchName}`);
             if (found) { prNumber = found.number; prUrl = found.html_url || ""; }
@@ -487,7 +537,7 @@ export default {
         if (config.autoMerge && prNumber) {
           update({ step: "merge" });
           try {
-            await gitee.mergePr(owner, repo, prNumber);
+            await api.mergePr(prNumber);
             merged = true;
             update({ status: "merged", prUrl });
           } catch (e) {
@@ -500,22 +550,25 @@ export default {
           `${statusEmoji} **AI 员工任务完成**`,
           ``,
           `- 分支：\`${branchName}\``,
-          prNumber ? `- PR：[${repo}#${prNumber}](${prUrl})` : "- 未创建 PR（请在 Gitee 上检查）",
+          prNumber ? `- PR：[${repo}#${prNumber}](${prUrl})` : `- 未创建 PR（请在 ${api.hostLabel()} 上检查）`,
           merged ? "- 状态：**已自动合并**" : "- 状态：PR 待审查合并",
           ``,
           `**处理总结：**`,
           ``,
           (summary.text || "(无总结输出)").slice(0, 3500),
         ].filter((l) => l !== "").join("\n");
-        await gitee.addComment(owner, repo, number, comment).catch(() => {});
+        await api.addComment(number, comment).catch(() => {});
 
         // ── 完成后自动关闭 issue（企业仓库走企业前缀路径）──
         if (config.autoCloseIssue) {
           update({ step: "close-issue" });
           try {
-            const repoMeta = (issue && issue.repository) || (await gitee.getRepo(owner, repo).catch(() => null));
-            const entPath = (repoMeta && repoMeta.namespace && repoMeta.namespace.path) || (repoMeta && repoMeta.enterprise && repoMeta.enterprise.path) || "";
-            await gitee.closeIssue(owner, repo, number, entPath || null);
+            let entPath = null;
+            if (p === "gitee") {
+              const repoMeta = (issue && issue.repository) || (await api.getRepo().catch(() => null));
+              entPath = (repoMeta && repoMeta.namespace && repoMeta.namespace.path) || (repoMeta && repoMeta.enterprise && repoMeta.enterprise.path) || "";
+            }
+            await api.closeIssue(number, entPath || null);
             update({ status: merged ? "merged" : "pr-created", step: "closed" });
             console.log("[gitee-ai] issue closed: " + key);
           } catch (e) {
@@ -529,7 +582,7 @@ export default {
       } catch (e) {
         update({ status: "failed", detail: String((e && e.message) || e) });
         console.error("[gitee-ai] task error: " + key, e);
-        await gitee.addComment(owner, repo, number, `❌ **AI 员工处理失败**：\n\n\`\`\`\n${String((e && e.message) || e).slice(0, 1500)}\n\`\`\``).catch(() => {});
+        await api.addComment(number, `❌ **AI 员工处理失败**：\n\n\`\`\`\n${String((e && e.message) || e).slice(0, 1500)}\n\`\`\``).catch(() => {});
         return { failed: true };
       } finally {
         active.delete(key);
@@ -538,20 +591,22 @@ export default {
 
     let pollDisposer = null;
     async function pollOnce() {
-      if (!tokenOk() || !config.pollEnabled) return;
+      if (!config.pollEnabled) return;
       const repos = Array.isArray(config.watchRepos) ? config.watchRepos : [];
       for (const spec of repos) {
-        const parts = String(spec).split("/");
-        const owner = (parts[0] || "").trim();
-        const rname = (parts[1] || "").trim();
-        if (!owner || !rname) continue;
+        const parsed = parseRepoSpec(spec);
+        if (!parsed) { console.log("[gitee-ai] poll: bad repo spec '" + spec + "', skip"); continue; }
+        const { platform: p, owner, repo: rname } = parsed;
+        if (!tokenOkFor(p)) { console.log("[gitee-ai] poll: " + p + " token not configured for " + spec + ", skip"); continue; }
         try {
-          const list = await gitee.listOpenIssues(owner, rname);
+          const api = platformApi(p, owner, rname);
+          const list = await api.listOpenIssues();
           const arr = Array.isArray(list) ? list : (list && Array.isArray(list.data) ? list.data : []);
           console.log("[gitee-ai] poll " + spec + ": " + arr.length + " open issue(s)");
           for (const issue of arr) {
             const number = issue && issue.number;
             if (!number) continue;
+            if (issue && issue.pull_request) continue; // GitHub 的 issues 列表会混入 PR
             const key = owner + "/" + rname + "#" + number;
             if (handledKeys.has(key)) continue;
             if (active.has(key)) continue;
@@ -563,7 +618,7 @@ export default {
             }
             console.log("[gitee-ai] poll: found @mention issue " + key);
             handledKeys.add(key);
-            void processIssue(owner, rname, number, issue, "");
+            void processIssue(p, owner, rname, number, issue, "");
           }
         } catch (e) {
           console.error("[gitee-ai] poll error for " + spec + ": " + String((e && e.message) || e));
@@ -573,7 +628,7 @@ export default {
 
     function restartPolling() {
       if (pollDisposer) { try { pollDisposer(); } catch (e) {} pollDisposer = null; }
-      if (config.pollEnabled && tokenOk()) {
+      if (config.pollEnabled && (tokenOk() || tokenOkFor("github"))) {
         pollDisposer = timer.interval(() => { void pollOnce(); }, Math.max(10000, config.pollIntervalMs || 60000));
         console.log("[gitee-ai] polling started every " + Math.round((config.pollIntervalMs || 60000) / 1000) + "s for " + (config.watchRepos || []).length + " repo(s)");
         void pollOnce();
@@ -678,11 +733,17 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
 <div class="card"><h2>基础</h2>
 <label>Gitee 私人令牌（token）</label><input type="password" name="giteeToken" placeholder="b04e…" value="">
 <div class="hint">${esc(tokenVal)} 留空则保持原值</div>
+<label>GitHub 私人令牌（token，可选）</label><input type="password" name="githubToken" placeholder="ghp_…" value="">
+<div class="hint">${esc(c.githubToken ? "已配置" : "未配置")} 留空则保持原值；用于 github: 前缀的监听仓库</div>
+<label>默认平台（watchRepos 无前缀行）</label><select name="defaultPlatform" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:14px">
+<option value="gitee" ${(c.defaultPlatform || "gitee") !== "github" ? "selected" : ""}>gitee</option>
+<option value="github" ${(c.defaultPlatform || "gitee") === "github" ? "selected" : ""}>github</option>
+</select>
 <label>机器人账号（issue 里 @ 它触发）</label><input type="text" name="botName" value="${esc(c.botName)}">
 <label>workRoot（克隆仓库的工作目录）</label><input type="text" name="workRoot" value="${esc(c.workRoot)}">
 </div>
 <div class="card"><h2>仓库与轮询</h2>
-<label>监听仓库（owner/repo，每行一个）</label><textarea name="watchRepos" rows="3" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:13px">${esc(Array.isArray(c.watchRepos) ? c.watchRepos.join("\n") : "")}</textarea>
+<label>监听仓库（[gitee:|github:]owner/repo，每行一个）</label><textarea name="watchRepos" rows="3" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:13px">${esc(Array.isArray(c.watchRepos) ? c.watchRepos.join("\n") : "")}</textarea>
 <div class="check"><input type="checkbox" name="pollEnabled" ${c.pollEnabled ? "checked" : ""}><span>启用定时轮询</span></div>
 <label>轮询间隔（毫秒）</label><input type="number" name="pollIntervalMs" value="${esc(c.pollIntervalMs)}">
 </div>
@@ -705,6 +766,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
           const form = parseForm(raw);
           const next = { ...config };
           if (form.giteeToken && form.giteeToken.trim()) next.giteeToken = form.giteeToken.trim();
+          if (form.githubToken && form.githubToken.trim()) next.githubToken = form.githubToken.trim();
+          if (form.defaultPlatform) next.defaultPlatform = normPlatform(form.defaultPlatform);
           if (form.botName !== undefined) next.botName = form.botName.trim() || next.botName;
           if (form.workRoot !== undefined) next.workRoot = form.workRoot.trim() || next.workRoot;
           if (form.pollIntervalMs) next.pollIntervalMs = Number(form.pollIntervalMs) || next.pollIntervalMs;
@@ -715,6 +778,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
           const p = await saveConfigToPatch(next);
           // 内存中立即更新（本进程生效），并重启轮询
           config.giteeToken = next.giteeToken;
+          config.githubToken = next.githubToken;
+          config.defaultPlatform = next.defaultPlatform;
           config.botName = next.botName;
           config.workRoot = next.workRoot;
           config.pollIntervalMs = next.pollIntervalMs;
@@ -788,6 +853,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
     async function handleTrigger(req, res) {
       try {
         const q = queryParams(req.url || "");
+        const platform = normPlatform(q.platform || config.defaultPlatform);
         const owner = (q.owner || "").trim();
         const repo = (q.repo || "").trim();
         const number = (q.number || "").trim();
@@ -797,8 +863,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         }
         send(res, 200, { ok: true, accepted: true, key: owner + "/" + repo + "#" + number, note: "处理中，详见日志/面板" });
         let issueDetail = null;
-        try { issueDetail = await gitee.getIssue(owner, repo, number); } catch (e) { issueDetail = null; }
-        void processIssue(owner, repo, number, issueDetail || {}, (q.comment || "").slice(0, 2000));
+        try { issueDetail = await apiFetch(platform, "GET", `/repos/${owner}/${repo}/issues/${encodeURIComponent(number)}`); } catch (e) { issueDetail = null; }
+        void processIssue(platform, owner, repo, number, issueDetail || {}, (q.comment || "").slice(0, 2000));
       } catch (e) {
         console.error("[gitee-ai] trigger handler error:", e);
         send(res, 500, { ok: false, error: String((e && e.message) || e) });
@@ -836,8 +902,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
       if (active.has(key)) { console.log("[gitee-ai] already active: " + key); return; }
       handledKeys.add(key);
       let issueDetail = null;
-      try { issueDetail = await gitee.getIssue(owner, rname, number); } catch (e) { issueDetail = issue; }
-      await processIssue(owner, rname, number, issueDetail || issue, commentBody);
+      try { issueDetail = await apiFetch("gitee", "GET", `/repos/${owner}/${rname}/issues/${encodeURIComponent(number)}`); } catch (e) { issueDetail = issue; }
+      await processIssue("gitee", owner, rname, number, issueDetail || issue, commentBody);
     }
 
     // ── 注册 HTTP 路由：全新随机路径，避开历史残留 ────────────────────
@@ -908,6 +974,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
                 botName: config.botName, webhookPath: finalHookPath, triggerPath: finalGoPath,
                 workRoot: config.workRoot, autoMerge: config.autoMerge,
                 autoCloseIssue: !!config.autoCloseIssue, tokenConfigured: tokenOk(),
+                githubTokenConfigured: tokenOkFor("github"),
+                defaultPlatform: config.defaultPlatform || "gitee",
                 gitUser: config.gitUser || "", pollEnabled: !!config.pollEnabled,
                 pollIntervalMs: config.pollIntervalMs,
                 watchRepos: Array.isArray(config.watchRepos) ? config.watchRepos : [],
@@ -956,6 +1024,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
               if (typeof body.pollEnabled === "boolean") next.pollEnabled = body.pollEnabled;
               if (typeof body.autoMerge === "boolean") next.autoMerge = body.autoMerge;
               if (typeof body.autoCloseIssue === "boolean") next.autoCloseIssue = body.autoCloseIssue;
+              if (typeof body.defaultPlatform === "string") next.defaultPlatform = normPlatform(body.defaultPlatform);
+              if (typeof body.githubToken === "string" && body.githubToken.trim()) next.githubToken = body.githubToken.trim();
               const savedTo = await saveConfigToPatch(next);
               Object.assign(config, next);
               restartPolling();
@@ -984,6 +1054,8 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         botName: config.botName, webhookPath: finalHookPath, triggerPath: finalGoPath,
         workRoot: config.workRoot, autoMerge: config.autoMerge,
         autoCloseIssue: !!config.autoCloseIssue, tokenConfigured: tokenOk(),
+        githubTokenConfigured: tokenOkFor("github"),
+        defaultPlatform: config.defaultPlatform || "gitee",
         gitUser: config.gitUser || "", pollEnabled: !!config.pollEnabled,
         pollIntervalMs: config.pollIntervalMs,
         watchRepos: Array.isArray(config.watchRepos) ? config.watchRepos : [],

@@ -1,17 +1,20 @@
 # Gitee AI 员工 (gitee-ai-employee)
 
-An issue-driven AI developer for **DeepSeek Harness**, working against **Gitee (码云)**.
+An issue-driven AI developer for **DeepSeek Harness**, working against **Gitee (码云)** and **GitHub**.
 
-Mention your bot in a Gitee issue, and the plugin clones the repository, dispatches an
+Mention your bot in an issue, and the plugin clones the repository, dispatches an
 AI **worker agent** to implement the change, pushes a branch, opens a Pull Request to the
-branch you ask for, and can auto-merge and auto-close the issue.
+branch you ask for, and can auto-merge and auto-close the issue. You can watch Gitee and
+GitHub repositories at the same time.
 
 > 中文说明见 [README.zh.md](README.zh.md)。
 
 ## What it does
 
-- **Polling**: periodically scans the Gitee issues of the repositories you watch for a new
-  mention of your bot (`@botName`).
+- **Polling**: periodically scans the issues of the repositories you watch for a new
+  mention of your bot (`@botName`). Dual platform: each watch row can be prefixed
+  `gitee:` or `github:` (unprefixed rows use `defaultPlatform`, default `gitee`), so you can
+  watch both platforms at once.
 - **AI development**: creates a worker agent in a profile that clones the repo (via
   PowerShell + `curl` on Windows), explores it, implements the issue, runs checks, and
   commits on a `ai-fix/issue-<number>` branch.
@@ -48,9 +51,11 @@ Restart dsh, then open **Settings → Plugins → Plugin configuration**, find t
 | Setting | Meaning |
 | --- | --- |
 | `giteeToken` | Gitee personal access token (kept secret; never returned by the status API) |
+| `githubToken` | GitHub personal access token, optional (kept secret; only needed for `github:` repos) |
+| `defaultPlatform` | Platform for unprefixed `watchRepos` rows: `gitee` (default) or `github` |
 | `botName` | The account/issues mention that triggers the bot, e.g. `gitee-ai`. ASCII is recommended. |
 | `workRoot` | Where repositories are cloned; empty = `$DSH_HOME/gitee-workers` |
-| `watchRepos` | Repos to poll, one `owner/repo` per line |
+| `watchRepos` | Repos to poll, one per line: `owner/repo` (uses `defaultPlatform`) or `gitee:owner/repo` / `github:owner/repo` |
 | `pollEnabled` / `pollIntervalMs` | Poll on/off and interval (milliseconds) |
 | `autoMerge` | Auto-merge the created PR |
 | `autoCloseIssue` | Close the issue once the task succeeds |
@@ -68,6 +73,14 @@ Restart dsh, then open **Settings → Plugins → Plugin configuration**, find t
 3. The plugin picks it up (usually within one poll interval), comments "已接单", runs the
    worker, and later posts the result with the PR link. With `autoCloseIssue` on, the issue
    is closed on success.
+
+For GitHub repos the same flow applies — just configure `githubToken` and add the repo as
+`github:owner/repo` in `watchRepos` (or set `defaultPlatform` to `github`). For one-off runs
+you can also trigger directly:
+
+```
+http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&number=5
+```
 
 > The bot name match uses a lookahead (`(?![A-Za-z0-9_])`) so both ASCII and CJK bot names
 > trigger correctly.
