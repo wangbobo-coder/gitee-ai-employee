@@ -1,6 +1,6 @@
 {
   "name": "gitee-ai-employee",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Gitee/GitHub AI 员工：在 issue 里 @ 机器人，它自动克隆仓库、按你指定的分支开发并提交 PR（可自动合并、自动关闭 issue）。An issue-driven AI developer for DeepSeek Harness (Gitee & GitHub): @ the bot on an issue, it clones the repo, implements on the branch you name, opens a PR, and can auto-merge and close.",
   "license": "MIT",
   "type": "module",
