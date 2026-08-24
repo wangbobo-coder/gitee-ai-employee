@@ -92,7 +92,7 @@ export default {
     const agents = ctx.agents;
     const agentDefaultModel = ctx.get("agentDefaultModel");
     const agentPresets = ctx.agentPresets;
-    const webServer = ctx.get("webServer");
+    let webServer = ctx.get("webServer");
     const shell = ctx.shell;
     const timer = ctx.timer;
     console.log("[gitee-ai] apply(composition) services ok: agents/shell/timer available; webServer=" + (webServer ? "yes" : "no") + " agentDefaultModel=" + (agentDefaultModel ? "yes" : "no"));
@@ -907,7 +907,12 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
     }
 
     // ── 注册 HTTP 路由：全新随机路径，避开历史残留 ────────────────────
-    // （webServer 为可选服务：缺失时路由不注册，轮询/worker 仍可工作）
+    // （webServer 为可选服务且通常在 apply 之后才就绪：先立即尝试，未就绪时
+    //   用 ctx.inject 等它出现后再补注册，保证 /gitee-ai/config 等路由终态可用）
+    let finalHookPath = null;
+    let finalGoPath = null;
+    let finalStatusPath = null;
+    const registerAllRoutes = () => {
     let settingsDisposer = null;
     if (webServer) {
       try {
@@ -933,7 +938,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         hookPath = "/gitee-ai-hook-" + randomSuffix();
       }
     }
-    const finalHookPath = hookDisposer ? hookPath : null;
+    finalHookPath = hookDisposer ? hookPath : null;
 
     let goPath = "/gitee-ai-go-" + randomSuffix();
     let goDisposer = null;
@@ -946,7 +951,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         goPath = "/gitee-ai-go-" + randomSuffix();
       }
     }
-    const finalGoPath = goDisposer ? goPath : null;
+    finalGoPath = goDisposer ? goPath : null;
 
     ctx.on("dispose", () => {
       if (hookDisposer) try { hookDisposer(); } catch (e) {}
@@ -990,7 +995,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         statusPath = "/gitee-ai-status-" + randomSuffix();
       }
     }
-    const finalStatusPath = statusDisposer ? statusPath : null;
+    finalStatusPath = statusDisposer ? statusPath : null;
     if (statusDisposer) {
       ctx.on("dispose", () => { try { statusDisposer(); } catch (e) {} });
       console.log("[gitee-ai] status endpoint at " + finalStatusPath);
@@ -1048,6 +1053,20 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
       ctx.on("dispose", () => { try { configApiDisposer(); } catch (e) {} });
       console.log("[gitee-ai] config api at /gitee-ai/config");
     }
+    }
+    };
+    if (webServer) {
+      try { registerAllRoutes(); }
+      catch (e) { console.error("[gitee-ai] route registration failed:", String((e && e.message) || e)); }
+    } else {
+      // webServer 在 apply 时尚未就绪：等它出现后再补注册（机制同 settings）
+      ctx.inject(["webServer"], (wctx) => {
+        if (webServer) return;
+        webServer = (wctx && wctx.get ? wctx.get("webServer") : undefined) || ctx.get("webServer") || webServer;
+        if (!webServer) return;
+        try { registerAllRoutes(); }
+        catch (e) { console.error("[gitee-ai] late route registration failed:", String((e && e.message) || e)); }
+      });
     }
     function configSummary() {
       return {
