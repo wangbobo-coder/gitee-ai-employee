@@ -1,0 +1,9 @@
+# Gitee AI 员工 —— 默认配置层（bundle patch）。
+#
+# 注意：本文件只含插件行的插入声明（无 config 块 = 全部使用代码内置的
+# 空默认值），绝不携带任何隐私信息或 token。
+# 用户配置通过「设置 → 插件配置」卡片保存，持久化在用户自身 profile
+# 层的 patch 中；本文件始终保持干净，可安全随包分发。
+- insert:
+    - id: gitee-ai-employee
+      name: gitee-ai-employee
