@@ -83,10 +83,10 @@ window.__ModuleLoader__.load({
           },
           h('div', { className: 'At1oFq_head' },
             h('span', { className: 'At1oFq_label' }, label),
-            hint
-              ? h('span', { className: 'At1oFq_badgeMuted', style: { fontSize: '11px', lineHeight: '17px', color: 'var(--dsw-alias-label-tertiary)' } }, hint)
-              : null,
           ),
+          hint
+            ? h('div', { style: { fontSize: '12px', lineHeight: '17px', color: 'var(--dsw-alias-label-tertiary)', display: 'block', whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' } }, hint)
+            : null,
           control,
         )
 
@@ -111,6 +111,19 @@ window.__ModuleLoader__.load({
           ),
           sub ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.45 } }, sub) : null,
         )
+
+      // 分区内层卡片：把某一模块的全部字段包进带浅色描边的容器，与另一模块形成视觉隔离。
+      var innerCard = (key, accent, children) =>
+        h('div', {
+          key: key,
+          style: {
+            border: '1px solid ' + accent + '59',
+            borderRadius: '10px',
+            padding: '2px 14px 6px',
+            margin: '2px 0 2px',
+            background: accent + '0D',
+          },
+        }, children)
 
       // 自定义开关行：左侧标签，右侧紧凑的 iOS 风格 toggle
       var toggleRow = (label, hint, checked, onChange, key) =>
@@ -444,31 +457,32 @@ window.__ModuleLoader__.load({
             controls.push(sectionBlock(t.issueBlock,
               '监听 issue：@ 机器人后自动克隆仓库开发、推分支、提 PR，可自动合并 / 自动关闭。下面这些设置会真实操作你的仓库（改代码、推送分支、合并 PR），请仔细确认。',
               '会真实操作仓库 · 自动提 PR', '#dc2626', '#3b82f6', 'issueBlock'))
-            controls.push(fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
+            var issueFields = []
+            issueFields.push(fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
               key: 'token',
               type: 'password',
               placeholder: draft.tokenConfigured ? '••••••••（留空保持原值）' : '输入 Gitee 私人令牌',
               value: (draft.token !== undefined ? draft.token : ''),
               onChange: (e) => setDraftFromControl({ token: e.target.value }),
             }), 'token'))
-            controls.push(fieldRow('GitHub 令牌（可选）', '留空保持原值；用于 github: 前缀的仓库', h(Input, {
+            issueFields.push(fieldRow('GitHub 令牌（可选）', '留空保持原值；用于 github: 前缀的仓库', h(Input, {
               key: 'githubToken',
               type: 'password',
               placeholder: draft.githubTokenConfigured ? '••••••••（留空保持原值）' : '输入 GitHub 私人令牌（可选）',
               value: (draft.githubToken !== undefined ? draft.githubToken : ''),
               onChange: (e) => setDraftFromControl({ githubToken: e.target.value }),
             }), 'githubToken'))
-            controls.push(fieldRow(t.bot, t.botHint, h(Input, {
+            issueFields.push(fieldRow(t.bot, t.botHint, h(Input, {
               key: 'bot',
               value: draft.botName || '',
               onChange: (e) => setDraftFromControl({ botName: e.target.value }),
             }), 'bot'))
-            controls.push(fieldRow(t.workRoot, undefined, h(Input, {
+            issueFields.push(fieldRow(t.workRoot, undefined, h(Input, {
               key: 'workRoot',
               value: draft.workRoot || '',
               onChange: (e) => setDraftFromControl({ workRoot: e.target.value }),
             }), 'workRoot'))
-            controls.push(fieldRow(t.repos, t.reposHint, h('textarea', {
+            issueFields.push(fieldRow(t.repos, t.reposHint, h('textarea', {
               key: 'repos',
               rows: 3,
               className: 'At1oFq_input',
@@ -476,29 +490,31 @@ window.__ModuleLoader__.load({
               value: draft.watchRepos || '',
               onChange: (e) => setDraftFromControl({ watchRepos: e.target.value }),
             }), 'repos'))
-            controls.push(toggleRow(t.poll, undefined, draft.pollEnabled, (v) => setDraftFromControl({ pollEnabled: v }), 'poll'))
-            controls.push(fieldRow(t.interval, undefined, h(Input, {
+            issueFields.push(toggleRow(t.poll, undefined, draft.pollEnabled, (v) => setDraftFromControl({ pollEnabled: v }), 'poll'))
+            issueFields.push(fieldRow(t.interval, undefined, h(Input, {
               key: 'interval',
               type: 'number',
               value: draft.pollIntervalMs,
               onChange: (e) => setDraftFromControl({ pollIntervalMs: e.target.value }),
             }), 'interval'))
-            controls.push(toggleRow(t.merge, undefined, draft.autoMerge, (v) => setDraftFromControl({ autoMerge: v }), 'merge'))
-            controls.push(toggleRow(t.close, undefined, draft.autoCloseIssue, (v) => setDraftFromControl({ autoCloseIssue: v }), 'close'))
+            issueFields.push(toggleRow(t.merge, undefined, draft.autoMerge, (v) => setDraftFromControl({ autoMerge: v }), 'merge'))
+            issueFields.push(toggleRow(t.close, undefined, draft.autoCloseIssue, (v) => setDraftFromControl({ autoCloseIssue: v }), 'close'))
+            controls.push(innerCard('issueCard', '#3b82f6', issueFields))
 
             // ── 分区B：代码安全扫描（只读审计）──
             controls.push(sectionBlock(t.scan,
               '对「扫描仓库」里的仓库做静态安全审计（克隆到本地、按内置/自定义提示词检查），发现新漏洞去重后提交 [安全扫描] issue。全程只读审计，不会改代码、不会提 PR。',
               '只读审计 · 只提交漏洞 issue', '#059669', '#10b981', 'scanBlock'))
-            controls.push(toggleRow(t.scanEnable, undefined, draft.scanEnabled, (v) => setDraftFromControl({ scanEnabled: v }), 'scanEnable'))
-            controls.push(fieldRow(t.scanReposLabel, t.scanReposHint, h('textarea', {
+            var scanFields = []
+            scanFields.push(toggleRow(t.scanEnable, undefined, draft.scanEnabled, (v) => setDraftFromControl({ scanEnabled: v }), 'scanEnable'))
+            scanFields.push(fieldRow(t.scanReposLabel, t.scanReposHint, h('textarea', {
               key: 'scanRepos', rows: 3,
               className: 'At1oFq_input',
               style: { height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5 },
               value: draft.scanRepos || '',
               onChange: (e) => setDraftFromControl({ scanRepos: e.target.value }),
             }), 'scanRepos'))
-            controls.push(h('div', { key: 'fetchReposRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 0', flexWrap: 'wrap' } },
+            scanFields.push(h('div', { key: 'fetchReposRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 0', flexWrap: 'wrap' } },
               h('button', {
                 type: 'button',
                 onClick: fetchMyRepos,
@@ -507,32 +523,32 @@ window.__ModuleLoader__.load({
               }, fetchBusy ? t.scanFetching : t.scanFetch),
               fetchNote ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, fetchNote) : null,
             ))
-            controls.push(fieldRow(t.scanSeverity, t.scanSeverityHint, h('select', {
+            scanFields.push(fieldRow(t.scanSeverity, t.scanSeverityHint, h('select', {
               key: 'scanSeverity',
               className: 'At1oFq_input',
               style: { padding: '8px 12px' },
               value: draft.scanMinSeverity || 'medium',
               onChange: (e) => setDraftFromControl({ scanMinSeverity: e.target.value }),
             }, ['critical', 'high', 'medium', 'low', 'none'].map((s) => h('option', { key: s, value: s }, s))), 'scanSeverity'))
-            controls.push(toggleRow(t.scanOneIssue, undefined, draft.scanOneIssuePerRun, (v) => setDraftFromControl({ scanOneIssuePerRun: v }), 'scanOneIssue'))
-            controls.push(fieldRow(t.scanConcurrency, undefined, h(Input, {
+            scanFields.push(toggleRow(t.scanOneIssue, undefined, draft.scanOneIssuePerRun, (v) => setDraftFromControl({ scanOneIssuePerRun: v }), 'scanOneIssue'))
+            scanFields.push(fieldRow(t.scanConcurrency, undefined, h(Input, {
               key: 'scanConcurrency', type: 'number', min: 1, max: 8,
               value: draft.scanConcurrency,
               onChange: (e) => setDraftFromControl({ scanConcurrency: e.target.value }),
             }), 'scanConcurrency'))
-            controls.push(fieldRow(t.scanPromptsLabel, t.scanPromptsHint, h('textarea', {
+            scanFields.push(fieldRow(t.scanPromptsLabel, t.scanPromptsHint, h('textarea', {
               key: 'scanPrompts', rows: 4,
               className: 'At1oFq_input',
               style: { height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.4, fontFamily: 'Consolas,monospace', fontSize: '11px' },
               value: draft.scanPrompts || '',
               onChange: (e) => setDraftFromControl({ scanPrompts: e.target.value }),
             }), 'scanPrompts'))
-            controls.push(fieldRow(t.scanInterval, undefined, h(Input, {
+            scanFields.push(fieldRow(t.scanInterval, undefined, h(Input, {
               key: 'scanInterval', type: 'number',
               value: draft.scanIntervalMs,
               onChange: (e) => setDraftFromControl({ scanIntervalMs: e.target.value }),
             }), 'scanInterval'))
-            controls.push(h('div', { key: 'scanNowRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0', flexWrap: 'wrap' } },
+            scanFields.push(h('div', { key: 'scanNowRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0', flexWrap: 'wrap' } },
               h('button', {
                 type: 'button',
                 onClick: scanNow,
@@ -541,6 +557,7 @@ window.__ModuleLoader__.load({
               }, scanBusy ? t.scanning : t.scanNow),
               scanNote ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, scanNote) : null,
             ))
+            controls.push(innerCard('scanCard', '#10b981', scanFields))
 
             body = h(
               'div',
