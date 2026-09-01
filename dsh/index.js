@@ -1210,32 +1210,61 @@ export default {
       for (const p of paths) {
         const text = await readFile(p);
         const doc = yaml.parseDocument(text);
-        const root = doc.contents;
-        let updated = false;
-        if (root && root.items && root.items[0] && root.items[0].get) {
-          const insertSeq = root.items[0].get("insert");
-          if (insertSeq && insertSeq.items && insertSeq.items[0] && insertSeq.items[0].get) {
-            const entryMap = insertSeq.items[0];
-            const entryJson = entryMap.toJSON ? entryMap.toJSON() : null;
-            if (entryJson && entryJson.id === "gitee-ai-employee") {
-              const configMap = entryMap.get("config", true);
-              if (configMap && configMap.set) {
-                for (const [k, v] of Object.entries(nextConfig)) {
-                  if (v === undefined) continue;
-                  configMap.set(k, v);
-                }
-                updated = true;
-              }
+        const entries = findPluginEntries(doc);
+        if (entries.length) {
+          for (const entryMap of entries) {
+            let configMap = entryMap.get("config", true);
+            if (!configMap || !configMap.set) {
+              configMap = doc.createNode({});
+              entryMap.set("config", configMap);
+            }
+            for (const [k, v] of Object.entries(nextConfig)) {
+              if (v === undefined) continue;
+              configMap.set(k, v);
             }
           }
-        }
-        if (updated) {
           await writeFile(p, doc.toString());
           written.push(p);
         }
       }
-      if (!written.length) throw new Error("gitee-ai-employee entry not found in patch");
+      if (!written.length) {
+        // 兜底：任何 patch 里都没有本插件条目（全新安装/非 overlay 布局）
+        // → 把条目 + config 直接补写进第一个 patch 文件，保证配置可落盘、可重启生效。
+        const p = paths[0];
+        let doc;
+        try { doc = yaml.parseDocument(await readFile(p)); } catch (e) { doc = new yaml.Document(); }
+        if (!doc.contents) doc.contents = doc.createNode([]);
+        if (!yaml.isSeq(doc.contents)) doc.contents = doc.createNode([doc.contents]);
+        const block = doc.createNode([{ insert: [{ id: "gitee-ai-employee", name: "gitee-ai-employee", config: nextConfig }] }]);
+        doc.contents.add(block.items[0]);
+        await writeFile(p, doc.toString());
+        written.push(p);
+      }
       return written.join("; ");
+    }
+    // 在 patch 文档中查找所有 gitee-ai-employee 条目节点。
+    // 兼容：顶层为 `- insert:` 序列、顶层为单个 `insert:` 映射、以及存在多个 insert 块的文档。
+    function findPluginEntries(doc) {
+      const out = [];
+      const scan = (nodes) => {
+        if (!nodes) return;
+        for (const item of nodes) {
+          if (!item || !item.get) continue;
+          const ins = item.get("insert");
+          if (ins && ins.items) {
+            for (const e of ins.items) {
+              try {
+                const j = e && e.toJSON && e.toJSON();
+                if (j && j.id === "gitee-ai-employee") out.push(e);
+              } catch (err) { /* 跳过无法序列化的节点 */ }
+            }
+          }
+        }
+      };
+      const root = doc && doc.contents;
+      if (yaml.isSeq(root)) scan(root && root.items);
+      else scan([root].filter(Boolean));
+      return out;
     }
     async function readFile(p) {
       const { readFile } = await import("node:fs/promises");
