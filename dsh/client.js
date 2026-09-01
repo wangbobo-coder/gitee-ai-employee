@@ -46,7 +46,7 @@ window.__ModuleLoader__.load({
         scan: '代码安全扫描',
         scanEnable: '启用定时扫描（全部仓库排队持续扫描，去重幂等）',
         scanReposLabel: '扫描仓库',
-        scanReposHint: '每行一个 owner/repo，[gitee:|github:] 前缀可选',
+        scanReposHint: '每行一个 owner/repo 或完整克隆地址（https://gitee.com/owner/repo.git、git@github.com:owner/repo.git 均可），[gitee:|github:] 前缀可选',
         scanSeverity: '最低上报级别',
         scanSeverityHint: 'critical / high / medium / low / none',
         scanOneIssue: '一次扫描合并为一个 issue',

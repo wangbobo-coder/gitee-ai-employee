@@ -289,18 +289,35 @@ export default {
       return s === "github" ? "github" : "gitee";
     }
 
-    // watchRepos 行格式："github:owner/repo" / "gitee:owner/repo" / 无前缀按
-    // config.defaultPlatform 判定。
+    // watchRepos/scanRepos 行格式：
+    //   "github:owner/repo" / "gitee:owner/repo" / 无前缀按 config.defaultPlatform 判定；
+    //   也兼容完整克隆地址：https://gitee.com/owner/repo.git、git@gitee.com:owner/repo.git、
+    //   https://github.com/owner/repo.git（按 host 推断平台，显式前缀优先）；
+    //   owner/repo 末尾的 .git 与多余斜杠会自动剥除。
     function parseRepoSpec(spec) {
-      const s = String(spec || "").trim();
+      const s = String(spec || "").trim().replace(/\/+$/, "");
+      if (!s) return null;
       let platform = normPlatform(config.defaultPlatform || "gitee");
       let rest = s;
+      let prefixed = false;
       const m = /^(github|gitee):(.+)$/i.exec(s);
-      if (m) { platform = normPlatform(m[1]); rest = m[2].trim(); }
+      if (m) { prefixed = true; platform = normPlatform(m[1]); rest = m[2].trim().replace(/\/+$/, ""); }
+      // 完整克隆地址（host / owner / repo 三段提取）
+      const urlM = /^(?:https?:\/\/|git@|ssh:\/\/git@|git:\/\/)([^\/:#]+)[:\/]([^\/]+)\/([^\/]+?)(?:\.git)?\/?$/i.exec(rest);
+      if (urlM) {
+        const host = urlM[1].toLowerCase();
+        const owner = urlM[2].trim();
+        const repo = urlM[3].trim();
+        if (!prefixed) platform = host.includes("github.") ? "github" : "gitee";
+        if (!owner || !repo || /[\s.]/.test(owner) || /[\s\\]/.test(repo)) return null;
+        return { platform, owner, repo };
+      }
+      // 以 http(s):// 开头但没匹配成完整地址（缺仓库段等）→ 拒绝，避免拆出畸形 owner/repo
+      if (/^https?:\/\//i.test(rest)) return null;
       const idx = rest ? rest.indexOf("/") : -1;
       if (idx <= 0 || idx === rest.length - 1) return null;
       const owner = rest.slice(0, idx).trim();
-      const repo = rest.slice(idx + 1).trim();
+      const repo = rest.slice(idx + 1).trim().replace(/\.git$/, "");
       if (!owner || !repo || /[\s.]/.test(owner) || /[\s\\]/.test(repo)) return null;
       return { platform, owner, repo };
     }

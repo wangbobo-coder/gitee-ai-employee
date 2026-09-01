@@ -1,6 +1,6 @@
 {
   "name": "gitee-ai-employee",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Gitee/GitHub AI 员工：issue 里 @ 机器人自动开发并提 PR；v1.2 新增代码安全扫描——配置仓库地址后按内置/自定义提示词扫描漏洞，去重后提交 issue。An issue-driven AI developer for DeepSeek Harness (Gitee & GitHub) with optional static security scanning (dedup + issue reporting).",
   "license": "MIT",
   "type": "module",
