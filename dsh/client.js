@@ -43,6 +43,24 @@ window.__ModuleLoader__.load({
         merge: '自动合并 PR',
         close: '成功后自动关闭 issue',
         status: '查看任务状态',
+        scan: '代码安全扫描',
+        scanEnable: '启用定时扫描（全部仓库排队持续扫描，去重幂等）',
+        scanReposLabel: '扫描仓库',
+        scanReposHint: '每行一个 owner/repo，[gitee:|github:] 前缀可选',
+        scanSeverity: '最低上报级别',
+        scanSeverityHint: 'critical / high / medium / low / none',
+        scanOneIssue: '一次扫描合并为一个 issue',
+        scanConcurrency: '同时扫描仓库数（1~8，默认 3，自动排队）',
+        scanPromptsLabel: '自定义提示词（JSON）',
+        scanPromptsHint: '{"id":{"name":"名称","prompt":"内容"}}，同 id 覆盖内置，留空用内置',
+        scanInterval: '扫描间隔（毫秒）',
+        scanFetch: '一键获取我的仓库',
+        scanFetching: '获取中…',
+        scanNow: '立即扫描全部仓库',
+        scanning: '触发中…',
+        scanDone: '已触发，结果见 /gitee-ai/scan',
+        scanFailed: '触发失败',
+        scanNeedRepos: '请先填写扫描仓库',
       }
     }
 
@@ -156,6 +174,14 @@ window.__ModuleLoader__.load({
         var note = noteState[0]
         var failed = failedState[0]
         var dirty = dirtyState[0]
+        var scanBusyState = react.useState(false)
+        var scanNoteState = react.useState('')
+        var scanBusy = scanBusyState[0]
+        var scanNote = scanNoteState[0]
+        var fetchBusyState = react.useState(false)
+        var fetchNoteState = react.useState('')
+        var fetchBusy = fetchBusyState[0]
+        var fetchNote = fetchNoteState[0]
 
         draftRef.current = draft
 
@@ -168,6 +194,15 @@ window.__ModuleLoader__.load({
           autoMerge: !!(config && config.autoMerge),
           autoCloseIssue: !!(config && config.autoCloseIssue),
           tokenConfigured: !!(config && config.tokenConfigured),
+          githubTokenConfigured: !!(config && config.githubTokenConfigured),
+          scanEnabled: !!(config && config.scanEnabled),
+          scanRepos: ((config && config.scanRepos) || []).join('\n'),
+          scanMinSeverity: (config && config.scanMinSeverity) || 'medium',
+          scanOneIssuePerRun: (config && config.scanOneIssuePerRun) !== false,
+          scanPrompts: (config && config.scanPrompts && Object.keys(config.scanPrompts).length)
+            ? JSON.stringify(config.scanPrompts, null, 2) : '',
+          scanIntervalMs: (config && config.scanIntervalMs) || 21600000,
+          scanConcurrency: (config && config.scanConcurrency) || 3,
         })
 
         var load = react.useCallback(() => {
@@ -204,10 +239,30 @@ window.__ModuleLoader__.load({
 
         var save = () => {
           if (!draft) return
+          var prompts = {}
+          if (draft.scanPrompts && draft.scanPrompts.trim()) {
+            try {
+              var parsed = JSON.parse(draft.scanPrompts)
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                for (var id in parsed) {
+                  var pv = parsed[id] || {}
+                  var nm = String(pv.name || '').trim()
+                  var pt = String(pv.prompt || '').trim()
+                  if (nm && pt) prompts[id] = { name: nm, prompt: pt }
+                }
+              }
+            } catch (e) {
+              noteState[1]('提示词 JSON 格式错误，请检查')
+              failedState[1](true)
+              return
+            }
+          }
           busyState[1](true)
           failedState[1](false)
           noteState[1]('')
           var payload = {
+            ...((draft.token && draft.token.trim()) ? { giteeToken: draft.token.trim() } : {}),
+            ...((draft.githubToken && draft.githubToken.trim()) ? { githubToken: draft.githubToken.trim() } : {}),
             botName: draft.botName,
             workRoot: draft.workRoot,
             watchRepos: (draft.watchRepos || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
@@ -215,6 +270,13 @@ window.__ModuleLoader__.load({
             pollIntervalMs: Number(draft.pollIntervalMs) || 60000,
             autoMerge: draft.autoMerge,
             autoCloseIssue: draft.autoCloseIssue,
+            scanEnabled: !!draft.scanEnabled,
+            scanRepos: (draft.scanRepos || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+            scanMinSeverity: draft.scanMinSeverity || 'medium',
+            scanOneIssuePerRun: draft.scanOneIssuePerRun !== false,
+            scanPrompts: prompts,
+            scanIntervalMs: Number(draft.scanIntervalMs) || 21600000,
+            scanConcurrency: Number(draft.scanConcurrency) || 3,
           }
           fetch('/gitee-ai/config', {
             method: 'POST',
@@ -250,10 +312,71 @@ window.__ModuleLoader__.load({
           failedState[1](false)
         }
 
+        // 立即扫描：对 draft 里的 scanRepos 逐个 POST /gitee-ai/scan（服务端自动排队，按并发上限持续扫描）
+        var scanNow = () => {
+          if (!draft) return
+          var repos = (draft.scanRepos || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+          if (!repos.length) { scanNoteState[1](t.scanNeedRepos); return }
+          scanBusyState[1](true)
+          scanNoteState[1]('')
+          var accepted = 0
+          var skipped = 0
+          var tasks = repos.map(function (spec) {
+            var platform = /^github:/i.test(spec) ? 'github' : /^gitee:/i.test(spec) ? 'gitee' : 'gitee'
+            var rest = spec.replace(/^(github|gitee):/i, '')
+            var idx = rest.indexOf('/')
+            var owner = rest.slice(0, idx)
+            var repo = rest.slice(idx + 1)
+            if (!owner || !repo) return Promise.resolve({ accepted: false })
+            return fetch('/gitee-ai/scan', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ platform: platform, owner: owner, repo: repo, dryRun: false }),
+            }).then(function (r) { return r.json().catch(function () { return { accepted: false } }) })
+              .then(function (b) {
+                if (b && b.accepted) accepted++
+                else skipped++
+                return b
+              })
+          })
+          Promise.all(tasks)
+            .then(function () {
+              scanNoteState[1]('已排队 ' + accepted + ' 个' + (skipped ? '（跳过 ' + skipped + ' 个：正在扫/已在队列）' : '') + '，同时最多扫 ' + (draft.scanConcurrency || 3) + ' 个')
+            })
+            .catch(function () { scanNoteState[1](t.scanFailed) })
+            .finally(function () { scanBusyState[1](false) })
+        }
+
+        // 一键获取我的仓库：拉取有权限的仓库（含所属组织），追加进 scanRepos 供人工勾选
+        var normLine = (s) => String(s || '').replace(/^(gitee|github):/i, '').toLowerCase()
+        var fetchMyRepos = () => {
+          if (fetchBusy) return
+          fetchBusyState[1](true)
+          fetchNoteState[1]('')
+          fetch('/gitee-ai/my-repos')
+            .then((r) => r.json().catch(() => ({ ok: false, error: '响应异常' })))
+            .then((b) => {
+              if (!b.ok || !Array.isArray(b.repos)) { fetchNoteState[1]('获取失败：' + ((b && b.error) || '未知错误')); return }
+              var cur = (draftRef.current.scanRepos || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+              var seen = {}
+              cur.forEach((s) => { seen[normLine(s)] = true })
+              var lines = cur.slice()
+              b.repos.forEach((x) => {
+                var line = x.platform + ':' + x.owner + '/' + x.repo
+                if (!seen[normLine(line)]) { lines.push(line); seen[normLine(line)] = true }
+              })
+              setDraftFromControl({ scanRepos: lines.join('\n') })
+              fetchNoteState[1]('已填入 ' + b.repos.length + ' 个仓库（含既有保留，去掉不需要的再保存）')
+            })
+            .catch((e) => fetchNoteState[1]('获取失败：' + String(e.message || e)))
+            .finally(() => fetchBusyState[1](false))
+        }
+
         // ── 头部（大标题 + 描述 + 展开箭头）──
         var statusLine = summary
           ? '轮询' + (summary.pollEnabled ? ' 开 · ' + Math.round((summary.pollIntervalMs || 0) / 1000) + 's' : ' 关')
             + ' · 仓库 ' + ((summary.watchRepos || []).length) + ' 个'
+            + ' · 扫描' + (summary.scanEnabled ? ' 开' : ' 关')
             + (summary.tokenConfigured ? '' : ' · 未配置令牌')
           : t.description
 
@@ -297,10 +420,17 @@ window.__ModuleLoader__.load({
             controls.push(fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
               key: 'token',
               type: 'password',
-              placeholder: draft.tokenConfigured ? '••••••••' : '输入 Gitee 私人令牌',
+              placeholder: draft.tokenConfigured ? '••••••••（留空保持原值）' : '输入 Gitee 私人令牌',
               value: (draft.token !== undefined ? draft.token : ''),
               onChange: (e) => setDraftFromControl({ token: e.target.value }),
             }), 'token'))
+            controls.push(fieldRow('GitHub 令牌（可选）', '留空保持原值；用于 github: 前缀的仓库', h(Input, {
+              key: 'githubToken',
+              type: 'password',
+              placeholder: draft.githubTokenConfigured ? '••••••••（留空保持原值）' : '输入 GitHub 私人令牌（可选）',
+              value: (draft.githubToken !== undefined ? draft.githubToken : ''),
+              onChange: (e) => setDraftFromControl({ githubToken: e.target.value }),
+            }), 'githubToken'))
             controls.push(fieldRow(t.bot, t.botHint, h(Input, {
               key: 'bot',
               value: draft.botName || '',
@@ -328,6 +458,60 @@ window.__ModuleLoader__.load({
             }), 'interval'))
             controls.push(toggleRow(t.merge, undefined, draft.autoMerge, (v) => setDraftFromControl({ autoMerge: v }), 'merge'))
             controls.push(toggleRow(t.close, undefined, draft.autoCloseIssue, (v) => setDraftFromControl({ autoCloseIssue: v }), 'close'))
+
+            // ── 代码安全扫描区（v1.2）──
+            controls.push(h('div', { key: 'scanTitle', className: 'At1oFq_label', style: { margin: '16px 0 4px', fontSize: '13px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t.scan))
+            controls.push(toggleRow(t.scanEnable, undefined, draft.scanEnabled, (v) => setDraftFromControl({ scanEnabled: v }), 'scanEnable'))
+            controls.push(fieldRow(t.scanReposLabel, t.scanReposHint, h('textarea', {
+              key: 'scanRepos', rows: 3,
+              className: 'At1oFq_input',
+              style: { height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5 },
+              value: draft.scanRepos || '',
+              onChange: (e) => setDraftFromControl({ scanRepos: e.target.value }),
+            }), 'scanRepos'))
+            controls.push(h('div', { key: 'fetchReposRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 0', flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button',
+                onClick: fetchMyRepos,
+                disabled: fetchBusy,
+                style: { background: '#2f6fed', color: '#fff', border: 0, borderRadius: '8px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' },
+              }, fetchBusy ? t.scanFetching : t.scanFetch),
+              fetchNote ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, fetchNote) : null,
+            ))
+            controls.push(fieldRow(t.scanSeverity, t.scanSeverityHint, h('select', {
+              key: 'scanSeverity',
+              className: 'At1oFq_input',
+              style: { padding: '8px 12px' },
+              value: draft.scanMinSeverity || 'medium',
+              onChange: (e) => setDraftFromControl({ scanMinSeverity: e.target.value }),
+            }, ['critical', 'high', 'medium', 'low', 'none'].map((s) => h('option', { key: s, value: s }, s))), 'scanSeverity'))
+            controls.push(toggleRow(t.scanOneIssue, undefined, draft.scanOneIssuePerRun, (v) => setDraftFromControl({ scanOneIssuePerRun: v }), 'scanOneIssue'))
+            controls.push(fieldRow(t.scanConcurrency, undefined, h(Input, {
+              key: 'scanConcurrency', type: 'number', min: 1, max: 8,
+              value: draft.scanConcurrency,
+              onChange: (e) => setDraftFromControl({ scanConcurrency: e.target.value }),
+            }), 'scanConcurrency'))
+            controls.push(fieldRow(t.scanPromptsLabel, t.scanPromptsHint, h('textarea', {
+              key: 'scanPrompts', rows: 4,
+              className: 'At1oFq_input',
+              style: { height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.4, fontFamily: 'Consolas,monospace', fontSize: '11px' },
+              value: draft.scanPrompts || '',
+              onChange: (e) => setDraftFromControl({ scanPrompts: e.target.value }),
+            }), 'scanPrompts'))
+            controls.push(fieldRow(t.scanInterval, undefined, h(Input, {
+              key: 'scanInterval', type: 'number',
+              value: draft.scanIntervalMs,
+              onChange: (e) => setDraftFromControl({ scanIntervalMs: e.target.value }),
+            }), 'scanInterval'))
+            controls.push(h('div', { key: 'scanNowRow', style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0', flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button',
+                onClick: scanNow,
+                disabled: scanBusy,
+                style: { background: 'var(--dsw-alias-danger, #dc2626)', color: '#fff', border: 0, borderRadius: '8px', padding: '8px 14px', fontSize: '13px', cursor: 'pointer' },
+              }, scanBusy ? t.scanning : t.scanNow),
+              scanNote ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, scanNote) : null,
+            ))
 
             body = h(
               'div',

@@ -29,13 +29,20 @@ GitHub repositories at the same time.
   auto-merges it (`autoMerge`), and optionally closes the issue on success (`autoCloseIssue`).
 - **Webhook / manual trigger**: optional webhook endpoint and a manual trigger URL for
   instant processing without waiting for the poll.
+- **Security scanning (v1.2)**: configure scan repositories (`scanRepos`) and the plugin
+  drives a scan worker (reusing the DSH model) through built-in/custom security prompts to
+  statically audit the cloned code. Findings are **deduplicated** — the same spot
+  (`file:line` + vulnerability type) is only reported once (dedup state persists at
+  `workRoot/scan-state.json`) — and new findings are submitted as issues automatically.
+  Supports scheduled scanning (`scanEnabled` + `scanIntervalMs`) and manual triggering
+  (the "立即扫描" button in the settings card or `POST /gitee-ai/scan`).
 
 ## Requirements
 
 - DeepSeek Harness (dsh) 0.1.x, Windows (the plugin drives `git` and the Gitee API through
   PowerShell + `C:\Windows\System32\curl.exe`), a Gitee account with a personal access token.
-- The worker preset is **bundled and auto-installed** into `$DSH_HOME/.agent-presets/gitee-worker`
-  on first load — no manual setup.
+- The worker and scanner presets are **bundled and auto-installed** into
+  `$DSH_HOME/.agent-presets/gitee-worker` (`gitee-scanner` likewise) on first load — no manual setup.
 
 ## Install
 
@@ -60,6 +67,13 @@ Restart dsh, then open **Settings → Plugins → Plugin configuration**, find t
 | `autoMerge` | Auto-merge the created PR |
 | `autoCloseIssue` | Close the issue once the task succeeds |
 | `workerPreset` | Agent preset id used for the worker (default `gitee-worker`) |
+| `scanEnabled` | Enable scheduled security scanning of `scanRepos` |
+| `scanRepos` | Repos to scan, one per line: `owner/repo` with optional `gitee:`/`github:` prefix |
+| `scanMinSeverity` | Minimum severity to report: `critical`/`high`/`medium`/`low`/`none` (default `medium`) |
+| `scanOneIssuePerRun` | `true` = one consolidated issue per run (default); `false` = one issue per finding |
+| `scanPrompts` | Custom/override prompts `{id:{name,prompt}}` (same id overrides a built-in) |
+| `scanIntervalMs` | Scheduled scan interval (default 21600000 = 6 h) |
+| `scanConcurrency` | Max repos scanned in parallel (1–8, default 3); a long `scanRepos` list queues up and keeps scanning until every repo is done |
 
 ## Usage
 
@@ -85,6 +99,25 @@ http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&numbe
 > The bot name match uses a lookahead (`(?![A-Za-z0-9_])`) so both ASCII and CJK bot names
 > trigger correctly.
 
+## Security scanning (v1.2)
+
+1. In the plugin config card (or `/gitee-ai/settings`), fill **扫描仓库** with one
+   `[gitee:|github:]owner/repo` per line, enable **启用定时扫描**, or click **立即扫描全部仓库**.
+   Click **一键获取我的仓库** to auto-fill every repo you can access (own + org memberships)
+   so you can keep/remove entries before saving (equivalent API: `GET /gitee-ai/my-repos`).
+2. The plugin clones the repo → runs the scan worker with the selected security prompts →
+   results land at `<repo>/.gitee-scan/result.json` → findings are diffed against
+   `scan-state.json` → **new** findings are submitted as an issue.
+
+**Built-in prompt ids**: `general` / `sqli` / `xss` / `command-injection` / `path-traversal` /
+`ssrf` / `hardcoded-secret` / `insecure-deserialization` / `authz` / `dos` / `dependency`.
+
+- Override a built-in by using the same id in `scanPrompts`; add custom ids for new checks.
+- Dedup signature is `file:line:vulnType`; already-reported signatures are skipped.
+- `POST /gitee-ai/scan` accepts `dryRun=true` (preview, no issue) and `force=true` (re-report).
+- `GET /gitee-ai/scan` returns the prompt catalog, scan jobs and dedup stats.
+- Scan issues are titled with a `[安全扫描]` prefix.
+
 ## Security notes
 
 - User configuration is persisted to the **user's own profile patch layer**; the shipped
@@ -93,6 +126,8 @@ http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&numbe
   (only a `tokenConfigured` boolean).
 - The plugin runs with the same privileges as your dsh process; its worker agent gets
   `danger-full-access` inside the cloned workspace only.
+- The scan worker is read-only static analysis; hardcoded-secret findings report type and
+  location only, never the secret value.
 
 ## Development
 

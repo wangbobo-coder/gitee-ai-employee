@@ -44,6 +44,67 @@ const DEFAULT_CONFIG = {
   defaultPlatform: "gitee",
   tmpDir: "",
   gitUser: "",
+  // ── 代码安全扫描（v1.2+）─────────────────────────────────────────────
+  scanEnabled: false,          // 是否启用定时扫描（scanRepos）
+  scanRepos: [],               // 扫描仓库列表（格式同 watchRepos：[gitee:|github:]owner/repo）
+  scanMinSeverity: "medium",   // 最低上报级别：critical|high|medium|low|none
+  scanOneIssuePerRun: true,    // true=一次扫描合并成一个 issue；false=每个发现一个 issue
+  scanPrompts: {},             // 提示词 { [id]: { name, prompt } }：覆写内置或新增自定义
+  scanWorkerPreset: "gitee-scanner",
+  scanIntervalMs: 21600000,    // 定时扫描间隔（默认 6 小时）
+  scanTimeoutMs: 1800000,      // 单次扫描超时（默认 30 分钟）
+  scanConcurrency: 3,          // 同时扫描的仓库上限（1~8；配很多仓库时排队持续扫描）
+};
+
+// ── 内置代码安全扫描提示词 ──────────────────────────────────────────────
+// scanPrompts 配置 = { [id]: { name, prompt } }，未配置时用这里的默认值；
+// 用户可在设置里按相同 id 覆写内容，或新增自定义 id（任意字符串 id），
+// 扫描时把选中的提示词连同审计任务一起发给扫描 worker。
+const BUILTIN_SCAN_PROMPTS = {
+  general: {
+    name: "综合安全审计",
+    prompt: "对仓库代码做一次全面安全审计：SQL 注入、XSS、命令注入、路径穿越、SSRF、硬编码密钥、不安全反序列化、越权/认证绕过、错误信息泄露、危险 API 误用等。每个发现都要落到具体文件与行号。",
+  },
+  sqli: {
+    name: "SQL 注入",
+    prompt: "查找 SQL 注入风险：字符串拼接的 SQL、ORM 使用不当（原生查询/动态查询拼接用户输入）、存储过程拼接、动态 order by/limit/列名拼接等。确认输入来源为用户可控且未经参数化。",
+  },
+  xss: {
+    name: "XSS 跨站脚本",
+    prompt: "查找 XSS 风险：未转义输出用户输入、innerHTML/v-html/dangerouslySetInnerHTML/模板字符串渲染、不安全的 href/javascript:、反射型与存储型 XSS。指出注入点、存储点与输出点。",
+  },
+  "command-injection": {
+    name: "命令注入",
+    prompt: "查找命令注入风险：exec/system/spawn/popen/ProcessBuilder/Runtime.exec/child_process 拼接用户输入、shell=True、不安全的子进程调用、危险的 eval 执行。指出注入点与可达性分析。",
+  },
+  "path-traversal": {
+    name: "路径穿越",
+    prompt: "查找路径穿越风险：文件读写拼接用户可控路径、zip 解压路径、下载文件名未校验 ../、任意路径删除/复制、符号链接攻击等。指出危险操作的文件与行号。",
+  },
+  ssrf: {
+    name: "SSRF",
+    prompt: "查找 SSRF 风险：接收用户 URL/主机/IP 后由服务端发起请求、代理转发、图片/附件抓取、Webhook、DNS 后访问内网、云元数据（169.254.169.254）可达等。指出请求发起点与数据来源。",
+  },
+  "hardcoded-secret": {
+    name: "硬编码密钥",
+    prompt: "查找硬编码的密钥/令牌/口令：AK/SK、API key、token、password/passwd、私钥、连接串中的口令、.env 文件被提交、密钥写入代码常量等。指出文件行号与密钥类型，但描述中不要粘贴完整密钥原文。",
+  },
+  "insecure-deserialization": {
+    name: "不安全反序列化",
+    prompt: "查找不安全反序列化风险：pickle、yaml.load/unsafe_load、readObject/XMLDecoder、不安全的 JSON 深度解析、反序列化用户输入后对象方法调用等。指出入口与潜在影响。",
+  },
+  authz: {
+    name: "越权与认证绕过",
+    prompt: "查找越权与认证绕过风险：仅前端鉴权、IDOR（直接用 id 访问他人资源）、缺失鉴权的管理端点、弱口令/默认口令逻辑、JWT 校验缺失或算法混淆、权限校验顺序错误等。",
+  },
+  dos: {
+    name: "资源耗尽 / DoS",
+    prompt: "查找资源耗尽风险：无上限的正则（ReDoS）、大文件/海量请求无限制、解压炸弹、无限重试无退避、未限制的查询深度/递归深度、内存放大等。指出触发点。",
+  },
+  dependency: {
+    name: "依赖与供应链",
+    prompt: "检查依赖风险：package.json/requirements.txt/pom.xml/go.mod 里存在已知高危漏洞的依赖、锁文件缺失、自定义证书校验被关闭的请求、依赖安装脚本风险等。只报告可确认的问题。",
+  },
 };
 
 // Cordis 4 原生 host 插件形态：对象插件 { Config, inject, apply }。
@@ -68,6 +129,16 @@ const GITEE_CONFIG_SCHEMA = z.object({
     defaultPlatform: z.string().default(DEFAULT_CONFIG.defaultPlatform),
     tmpDir: z.string().default(DEFAULT_CONFIG.tmpDir),
     gitUser: z.string().default(""),
+    scanEnabled: z.boolean().default(DEFAULT_CONFIG.scanEnabled),
+    scanRepos: z.array(z.string()).default([]),
+    scanMinSeverity: z.string().default(DEFAULT_CONFIG.scanMinSeverity),
+    scanOneIssuePerRun: z.boolean().default(DEFAULT_CONFIG.scanOneIssuePerRun),
+    // scanPrompts 是自由格式提示词映射 {id:{name,prompt}}，不放进 schema
+    // （此 DSH 的 schemastery 无 z.record；运行时对 object/array 都做归一化）。
+    scanWorkerPreset: z.string().default(DEFAULT_CONFIG.scanWorkerPreset),
+    scanIntervalMs: z.number().default(DEFAULT_CONFIG.scanIntervalMs),
+    scanTimeoutMs: z.number().default(DEFAULT_CONFIG.scanTimeoutMs),
+    scanConcurrency: z.number().default(DEFAULT_CONFIG.scanConcurrency),
 });
 
 export default {
@@ -82,6 +153,8 @@ export default {
   apply(ctx, rawConfig) {
     // runtime.callback(ctx, config)：配置作为第二个参数传入（不是 ctx.config）
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || ctx.config || {}) };
+    // scanPrompts 归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态
+    config.scanPrompts = toPromptMap(config.scanPrompts);
     // ── 可移植默认：未显式配置时按运行环境推导，不写死机器路径 ──
     const dshHome = process.env.DSH_HOME ? process.env.DSH_HOME : join(homedir(), ".dsh");
     if (!config.workRoot) {
@@ -98,13 +171,37 @@ export default {
     console.log("[gitee-ai] apply(composition) services ok: agents/shell/timer available; webServer=" + (webServer ? "yes" : "no") + " agentDefaultModel=" + (agentDefaultModel ? "yes" : "no"));
     ensureWorkerPreset();
 
+    // ── 提示词归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态 ──
+    function toPromptMap(v) {
+      const out = {};
+      if (Array.isArray(v)) {
+        for (const e of v) {
+          const id = String((e && e.id) || "").trim();
+          const name = String((e && e.name) || "").trim();
+          const prompt = String((e && e.prompt) || "").trim();
+          if (id && prompt) out[id] = { name: name || id, prompt };
+        }
+      } else if (v && typeof v === "object" && !Array.isArray(v)) {
+        for (const [id, e] of Object.entries(v)) {
+          if (!e || typeof e !== "object") continue;
+          const name = String(e.name || "").trim();
+          const prompt = String(e.prompt || "").trim();
+          if (prompt) out[id] = { name: name || id, prompt };
+        }
+      }
+      return out;
+    }
+
     // ── 宿主 settings 命名空间注册（关键：让「设置 → 插件 → 插件配置」页显示本插件卡片）──
     // 该页只渲染「宿主 serve 的命名空间」对应的 settings.plugin.item 卡片，且要求
     // 卡片 key === 命名空间（gitee-ai-employee）。不注册命名空间，卡片即使已注册也
     // 永远不会被该页派发 —— 旧版桌面端有另一种列表机制，故当时能显示、这里不能。
     ctx.inject(["settings"], (sctx) => {
       try {
-        sctx.settings.register("gitee-ai-employee", GITEE_CONFIG_SCHEMA, { base: { ...config } });
+        // base 里剔除 schema 未声明的自由格式字段（scanPrompts），避免校验报错
+        const baseCfg = Object.assign({}, config);
+        delete baseCfg.scanPrompts;
+        sctx.settings.register("gitee-ai-employee", GITEE_CONFIG_SCHEMA, { base: baseCfg });
         console.log("[gitee-ai] settings namespace 'gitee-ai-employee' registered (settings card enabled)");
       } catch (error) {
         console.error("[gitee-ai] settings namespace register failed:", String(error && error.message ? error.message : error));
@@ -122,29 +219,32 @@ export default {
       return typeof config.giteeToken === "string" && config.giteeToken.trim() !== "";
     }
 
-    // ── 自包含 worker 预设：把包内 preset 落盘到 $DSH_HOME/.agent-presets ──
+    // ── 自包含 agent 预设：把包内 preset 落盘到 $DSH_HOME/.agent-presets ──
     // 保证安装本插件的用户无需手动复制 preset，开箱即可用。
+    // gitee-worker：issue 开发 worker；gitee-scanner：代码安全扫描审计员。
     function ensureWorkerPreset() {
+      for (const presetId of ["gitee-worker", "gitee-scanner"]) ensurePreset(presetId);
+    }
+    function ensurePreset(presetId) {
       try {
-        const presetId = config.workerPreset || "gitee-worker";
         const presetDir = join(process.env.DSH_HOME || join(homedir(), ".dsh"), ".agent-presets", presetId);
         const target = join(presetDir, "agent.cordis.yml");
         if (existsSync(target)) {
-          console.log("[gitee-ai] worker preset already present: " + presetDir);
+          console.log("[gitee-ai] preset already present: " + presetDir);
           return;
         }
         const src = fileURLToPath(new URL("../preset/" + presetId + "/agent.cordis.yml", import.meta.url));
         if (!existsSync(src)) {
-          console.error("[gitee-ai] bundled worker preset missing: " + src);
+          console.error("[gitee-ai] bundled preset missing: " + src);
           return;
         }
         mkdirSync(presetDir, { recursive: true });
         copyFileSync(src, target);
         const srcMeta = fileURLToPath(new URL("../preset/" + presetId + "/preset.yml", import.meta.url));
         if (existsSync(srcMeta)) copyFileSync(srcMeta, join(presetDir, "preset.yml"));
-        console.log("[gitee-ai] worker preset installed -> " + presetDir);
+        console.log("[gitee-ai] preset installed -> " + presetDir);
       } catch (e) {
-        console.error("[gitee-ai] ensureWorkerPreset error:", String((e && e.message) || e));
+        console.error("[gitee-ai] ensurePreset error (" + presetId + "):", String((e && e.message) || e));
       }
     }
 
@@ -210,6 +310,49 @@ export default {
       const info = platformInfo(platform);
       const url = info.base + path;
       const token = info.token;
+      // 优先使用 Node 原生 fetch（Electron/Host 主进程 Node 24 自带，稳定且不经
+      // PowerShell 管道）；仅在原生 fetch 不可用时回退到 PowerShell+curl。
+      if (typeof fetch === "function") {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 60000);
+        try {
+          const headers = {
+            "Authorization": "token " + token,
+            "Accept": "application/json",
+            "User-Agent": "gitee-ai-employee",
+          };
+          const init = { method, headers, signal: ctrl.signal };
+          if (body !== undefined && body !== null) {
+            headers["Content-Type"] = "application/json";
+            init.body = JSON.stringify(body);
+          }
+          const res = await fetch(url, init);
+          const text = await res.text();
+          if (!res.ok) {
+            const err = { status: res.status, body: text };
+            const hint = (res.status === 404 && method === "POST")
+              ? "（若为 Gitee：token 可能缺少 issues/pull_requests 等写权限，请到 gitee.com 私人令牌重新生成并勾选对应 scope）"
+              : "";
+            err.message = platform + " api HTTP " + res.status + " for " + method + " " + path + " | " + text.slice(0, 200) + hint;
+            throw err;
+          }
+          if (!text) return null;
+          try { return JSON.parse(text); } catch (e) { return { raw: text }; }
+        } catch (e) {
+          if (e && e.status !== undefined) throw e;
+          let err;
+          if (e && e.name === "AbortError") {
+            err = new Error(platform + " api timeout for " + method + " " + path);
+          } else {
+            err = new Error(platform + " api network error for " + method + " " + path + ": " + String((e && e.message) || e));
+          }
+          err.status = 0;
+          err.body = "";
+          throw err;
+        } finally {
+          clearTimeout(to);
+        }
+      }
       const stamp = Date.now() + "-" + (++apiSeq);
       const outFile = config.tmpDir + "\\gitee-out-" + stamp + ".json";
       const codeFile = config.tmpDir + "\\gitee-code-" + stamp + ".txt";
@@ -255,6 +398,8 @@ export default {
     }
 
     // 按平台构造仓库级 API 方法集（GitHub 与 Gitee 路径/语义尽量复用）
+    // 注意：Gitee 已把「建/改 issue」接口改成 /repos/{owner}/issues（repo 放请求体），
+    // 旧的 /repos/{owner}/{repo}/issues 写操作会返回 404 "project or enterprise"。
     function platformApi(platform, owner, repo) {
       const p = normPlatform(platform);
       const gh = p === "github";
@@ -262,6 +407,9 @@ export default {
       return {
         getIssue: (n) => apiFetch(p, "GET", `${base}/issues/${encodeURIComponent(n)}`),
         listOpenIssues: () => apiFetch(p, "GET", `${base}/issues?state=open&per_page=50`),
+        createIssue: (data) => gh
+          ? apiFetch(p, "POST", `${base}/issues`, data)
+          : apiFetch(p, "POST", `/repos/${owner}/issues`, Object.assign({}, data, { owner, repo })),
         addComment: (n, bodyText) => apiFetch(p, "POST", `${base}/issues/${encodeURIComponent(n)}/comments`, { body: bodyText }),
         createPr: (data) => apiFetch(p, "POST", `${base}/pulls`, data),
         mergePr: (n) => apiFetch(p, "PUT", `${base}/pulls/${encodeURIComponent(n)}/merge`, { merge_method: "merge" }),
@@ -269,10 +417,57 @@ export default {
         getMe: () => apiFetch(p, "GET", "/user"),
         closeIssue: (n, enterprise) => gh
           ? apiFetch(p, "PATCH", `${base}/issues/${encodeURIComponent(n)}`, { state: "closed" })
-          : apiFetch(p, "PATCH", (enterprise ? `/enterprises/${enterprise}/issues/${encodeURIComponent(n)}` : `${base}/issues/${encodeURIComponent(n)}`), { state: "closed" }),
+          : apiFetch(p, "PATCH", `/repos/${owner}/issues/${encodeURIComponent(n)}`, { repo, state: "closed" }),
         prUrl: (n) => gh ? `https://github.com/${owner}/${repo}/pull/${n}` : `https://gitee.com/${owner}/${repo}/pull/${n}`,
         hostLabel: () => gh ? "GitHub" : "Gitee",
       };
+    }
+
+    // 一键获取「我的仓库」：自己 + 协作 + 所属组织的仓库（GitHub affiliation /
+    // Gitee type=all），供填入 scanRepos 后人工勾选保留。
+    async function fetchMyRepos(platform) {
+      const p = normPlatform(platform);
+      if (!tokenOkFor(p)) return { ok: false, error: p + " 未配置令牌" };
+      const out = [];
+      const diag = { at: new Date().toISOString(), platform: p };
+      try {
+        if (p === "github") {
+          for (let page = 1; page <= 5; page++) {
+            const data = await apiFetch(p, "GET", `/user/repos?affiliation=owner,collaborator,organization_member&sort=full_name&per_page=100&page=${page}`);
+            diag["page" + page] = Array.isArray(data) ? Array(data.length).fill(0).map((_, i) => { const r = data[i]; return String((r && r.full_name) || ""); }).slice(0, 3) : (data === null ? null : (typeof data === "object" ? String(JSON.stringify(data).slice(0, 120)) : String(data)));
+            if (!Array.isArray(data) || data.length === 0) break;
+            for (const r of data) {
+              const fn = String((r && r.full_name) || "").trim();
+              if (!fn || !fn.includes("/")) continue;
+              const [ow, rp] = fn.split("/");
+              out.push({ platform: p, owner: ow, repo: rp, fullName: fn });
+            }
+            if (data.length < 100) break;
+          }
+        } else {
+          for (let page = 1; page <= 5; page++) {
+            const data = await apiFetch(p, "GET", `/user/repos?type=all&per_page=100&page=${page}`);
+            diag["page" + page] = Array.isArray(data) ? Array(data.length).fill(0).map((_, i) => { const r = data[i]; return String((r && r.full_name) || ""); }).slice(0, 3) : (data === null ? null : (typeof data === "object" ? String(JSON.stringify(data).slice(0, 120)) : String(data)));
+            if (!Array.isArray(data) || data.length === 0) break;
+            for (const r of data) {
+              const fn = String((r && r.full_name) || "").trim();
+              if (!fn || !fn.includes("/")) continue;
+              const [ow, rp] = fn.split("/");
+              out.push({ platform: p, owner: ow, repo: rp, fullName: fn });
+            }
+            if (data.length < 100) break;
+          }
+        }
+        diag.ok = true;
+        diag.count = out.length;
+      } catch (e) {
+        diag.ok = false;
+        diag.error = String((e && e.message) || e);
+        try { writeFileSync(config.tmpDir + "\\gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
+        return { ok: false, error: diag.error };
+      }
+      try { writeFileSync(config.tmpDir + "\\gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
+      return { ok: true, repos: out };
     }
 
     async function cloneUrlFor(platform, owner, repo) {
@@ -349,7 +544,7 @@ export default {
       return { text, completed, errorMsg };
     }
 
-    async function runWorker({ dir, branchName, taskText }) {
+    async function runWorker({ dir, branchName, taskText, preset }) {
       const selection = agentDefaultModel && typeof agentDefaultModel.currentSelection === "function"
         ? agentDefaultModel.currentSelection()
         : null;
@@ -366,7 +561,7 @@ export default {
             const perms = agentCtx.get("permissionPresets");
             if (perms !== undefined) perms.set(agentCtx.agent.session, "danger-full-access");
           } catch (e) { /* optional */ }
-          await agentPresets.mount(agentCtx, config.workerPreset);
+          await agentPresets.mount(agentCtx, preset || config.workerPreset);
         },
       });
       await agent.whenIdle();
@@ -381,6 +576,353 @@ export default {
       const summary = summarizeAgent(agent, firstSeq);
       if (typeof dispose === "function") { try { await dispose(); } catch (e) {} }
       return summary;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // 代码安全扫描（v1.2）：
+    //   clone 仓库 → 用「内置/自定义提示词」驱动扫描 worker（复用 DSH 模型）
+    //   → 解析结构化发现 → 与 scan-state.json 去重 → 把新发现提交 issue。
+    //   同一位置（file:line) 同类问题只上报一次，重复扫描不会重复建 issue。
+    // ════════════════════════════════════════════════════════════════════
+    const scanJobs = new Map();
+    const scanActive = new Set();
+    const scanQueue = [];      // 待扫描仓库队列：受 scanConcurrency 限制，排队持续扫描
+    let scanPollDisposer = null;
+
+    function severityWeight(s) {
+      const w = { critical: 4, high: 3, medium: 2, low: 1, none: 0 };
+      return w[String(s || "").toLowerCase()] ?? 0;
+    }
+    function normSeverity(s) {
+      const v = String(s || "").toLowerCase();
+      return ["critical", "high", "medium", "low"].includes(v) ? v : "low";
+    }
+    function scanStateFile() {
+      return join(config.workRoot, "scan-state.json");
+    }
+    function loadScanState() {
+      try {
+        const p = scanStateFile();
+        if (existsSync(p)) {
+          const doc = JSON.parse(readFileSync(p, "utf8"));
+          if (doc && doc.version === 1) return doc;
+        }
+      } catch (e) { console.error("[gitee-ai] scan-state load error:", String((e && e.message) || e)); }
+      return { version: 1, reported: {}, runs: {} };
+    }
+    function saveScanState(state) {
+      try {
+        mkdirSync(config.workRoot, { recursive: true });
+        writeFileSync(scanStateFile(), JSON.stringify(state, null, 2), "utf8");
+      } catch (e) { console.error("[gitee-ai] scan-state save error:", String((e && e.message) || e)); }
+    }
+    function findingSig(f) {
+      const file = String((f && f.file) || "").replace(/\\/g, "/").replace(/^\.\//, "");
+      const vuln = String((f && f.vulnType) || "general").trim();
+      if (file) return file + ":" + (Number(f && f.line) || 0) + ":" + vuln;
+      return ":nofile:" + vuln + ":" + String((f && f.title) || "").slice(0, 80);
+    }
+    function resolveScanPrompts(ids, customPrompt) {
+      const merged = Object.assign({}, BUILTIN_SCAN_PROMPTS, config.scanPrompts || {});
+      const selected = Array.isArray(ids) && ids.length ? ids : Object.keys(merged);
+      const out = [];
+      for (const id of selected) {
+        const e = merged[id];
+        if (!e) continue;
+        out.push({ id, name: e.name || id, prompt: String(e.prompt || "") });
+      }
+      if (customPrompt && String(customPrompt).trim()) {
+        out.push({ id: "custom", name: "自定义提示词", prompt: String(customPrompt).trim() });
+      }
+      return out;
+    }
+    function buildScanTask({ p, owner, repo, dir, commit, prompts, resultFile }) {
+      const host = p === "github" ? "GitHub" : "Gitee";
+      const list = prompts.map((x, i) => `${i + 1}. [${x.id}] ${x.name}\n   ${x.prompt}`).join("\n");
+      return [
+        `你是 ${host} 仓库 ${owner}/${repo} 的安全代码审计员。仓库已克隆到 ${dir}，当前提交 ${commit || "HEAD"}。`,
+        ``,
+        `任务：按下列提示词逐项审计代码，寻找真实的安全漏洞。只做静态代码审计。`,
+        `绝对不要修改任何仓库文件（扫描结果文件除外）；不要执行 git add/commit/push；不要动 git 状态。`,
+        ``,
+        `审计提示词（逐项执行）：`,
+        list,
+        ``,
+        `输出要求：`,
+        `1. 把结果写入文件 ${resultFile}（用文件写入/编辑工具创建或覆盖该文件）——必须是严格 JSON。`,
+        `2. 格式：{"findings":[{"vulnType":"sqli","severity":"high","title":"一句话标题","file":"相对路径如 src/app.js","line":123,"description":"漏洞说明：触发点/输入来源/危害","suggestion":"修复建议"}]}`,
+        `3. severity 只允许 critical/high/medium/low 之一。`,
+        `4. 只报告真实、可定位到 file:line 的问题；没有把握或纯风格问题不要报，宁缺毋滥。`,
+        `5. 同一文件同一行同类问题只报一条，避免重复。`,
+        `6. 硬编码密钥类发现：description 里只写密钥类型与位置，严禁粘贴密钥/令牌/口令原文。`,
+        `7. 全部审计完没有发现任何漏洞时，写入 {"findings":[]}。`,
+      ].join("\n");
+    }
+    async function readScanResult(resultFile) {
+      try {
+        const r = await sh(`Get-Content -Raw -Path ${shellQuote(resultFile)} -ErrorAction SilentlyContinue`, { timeoutMs: 20000 });
+        const text = (r.stdout.text || "").trim();
+        if (!text) return { findings: [], note: "empty-result" };
+        const parsed = JSON.parse(text);
+        const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.findings) ? parsed.findings : []);
+        const findings = arr.filter((f) => f && f.title).map((f) => ({
+          vulnType: String(f.vulnType || "general").slice(0, 60),
+          severity: normSeverity(f.severity),
+          title: String(f.title).slice(0, 200),
+          file: String(f.file || "").replace(/\\/g, "/").replace(/^\.\//, ""),
+          line: Number(f.line) || 0,
+          description: String(f.description || "").slice(0, 2000),
+          suggestion: String(f.suggestion || "").slice(0, 1000),
+        }));
+        return { findings, note: "" };
+      } catch (e) {
+        return { findings: [], note: "parse-error: " + String((e && e.message) || e) };
+      }
+    }
+    function buildFindingsBody(owner, repo, findings, commit) {
+      const esc = (v) => String(v ?? "").replace(/[|]/g, "\\|").replace(/[\r\n]+/g, " ").slice(0, 400);
+      const sevEmoji = { critical: "🔴", high: "🟠", medium: "🟡", low: "🔵" };
+      const rows = findings.map((f) =>
+        `| ${sevEmoji[f.severity] || ""} ${f.severity} | \`${esc(f.file) || "(未知)"}:${f.line || "-"}\` | ${esc(f.title)} | \`${esc(f.vulnType)}\` |`
+      ).join("\n");
+      const details = findings.map((f, i) => {
+        const lines = [
+          `### ${i + 1}. [${f.severity}] ${f.title}`,
+          ``,
+          `- 类型：\`${esc(f.vulnType)}\`　位置：\`${esc(f.file) || "(未知)"}:${f.line || "-"}\``,
+          ``,
+          (f.description || "").trim() || "(无描述)",
+        ];
+        if ((f.suggestion || "").trim()) {
+          lines.push("", `**修复建议：** ${f.suggestion.trim()}`);
+        }
+        return lines.join("\n");
+      }).join("\n\n");
+      return [
+        `🤖 **代码安全扫描报告** — ${owner}/${repo} @ \`${(commit || "HEAD").slice(0, 8)}\``,
+        ``,
+        `本次扫描共发现 **${findings.length}** 个新问题（同一位置/同类问题不会重复上报）。`,
+        ``,
+        `| 级别 | 位置 | 问题 | 类型 |`,
+        `| --- | --- | --- | --- |`,
+        rows,
+        ``,
+        `---`,
+        ``,
+        details,
+      ].join("\n");
+    }
+
+    async function scanRepo(platform, owner, repo, opts = {}) {
+      const p = normPlatform(platform);
+      const api = platformApi(p, owner, repo);
+      const key = owner + "/" + repo;
+      if (!tokenOkFor(p)) return { skipped: "no-token" };
+      if (scanActive.has(key)) return { skipped: "busy" };
+      scanActive.add(key);
+      // 复用排队时创建的 job（否则新建），确保队列状态可见、不重复
+      let job = scanJobs.get(key) || null;
+      if (!job) {
+        job = { key, platform: p, status: "scanning", step: "prepare", startedAt: Date.now(), updatedAt: Date.now(), detail: "", dryRun: !!opts.dryRun, force: !!opts.force };
+        scanJobs.set(key, job);
+      } else {
+        Object.assign(job, { status: "scanning", step: "prepare", startedAt: Date.now(), updatedAt: Date.now(), detail: "", dryRun: !!opts.dryRun, force: !!opts.force });
+      }
+      const update = (patch) => { Object.assign(job, patch); job.updatedAt = Date.now(); };
+      const state = loadScanState();
+      try {
+        update({ step: "clone" });
+        const dir = await ensureRepo(p, owner, repo);
+        let commit = "";
+        try {
+          const cv = await sh(`git -C ${shellQuote(dir)} rev-parse HEAD`, { timeoutMs: 15000 });
+          commit = ((cv && cv.stdout && cv.stdout.text) || "").trim();
+        } catch (e) {}
+        const prompts = resolveScanPrompts(opts.prompts, opts.customPrompt);
+        update({ step: "scanning", detail: "prompts: " + prompts.map((x) => x.id).join(",") });
+        const scanDir = join(dir, ".gitee-scan");
+        const resultFile = join(scanDir, "result.json");
+        try { mkdirSync(scanDir, { recursive: true }); } catch (e) {}
+        void sh(`New-Item -ItemType Directory -Force -Path ${shellQuote(scanDir)} | Out-Null`, { timeoutMs: 15000 }).catch(() => {});
+        const taskText = buildScanTask({ p, owner, repo, dir, commit, prompts, resultFile });
+        let summary;
+        try {
+          summary = await Promise.race([
+            runWorker({ dir, branchName: "", taskText, preset: config.scanWorkerPreset }),
+            new Promise((resolve) => timer.timeout(() => resolve({
+              text: "扫描超时，worker 未在限定时间内完成。", completed: false, errorMsg: "timeout",
+            }), config.scanTimeoutMs)),
+          ]);
+        } catch (e) {
+          summary = { text: "扫描 worker 运行异常：" + String((e && e.message) || e), completed: false, errorMsg: "exception" };
+        }
+        update({ step: "collect" });
+        const { findings, note } = await readScanResult(resultFile);
+        if (note) update({ step: "dedup", detail: note });
+        const newFindings = [];
+        let dupCount = 0;
+        for (const f of findings) {
+          if (severityWeight(f.severity) < severityWeight(config.scanMinSeverity)) { f.skip = "below-minimum"; continue; }
+          const sig = findingSig(f);
+          const prev = state.reported[key] && state.reported[key][sig];
+          if (prev && !opts.force) { f.skip = "duplicate"; dupCount++; continue; }
+          newFindings.push(f);
+        }
+        update({ step: "report", detail: "found=" + findings.length + " new=" + newFindings.length + (opts.dryRun ? " (dry-run)" : "") });
+        let issueNumber = null;
+        let issueUrl = "";
+        const issueRefs = [];
+        if (newFindings.length && !opts.dryRun) {
+          if (config.scanOneIssuePerRun) {
+            const title = `[安全扫描] ${owner}/${repo}：${newFindings.length} 个新发现`;
+            const created = await api.createIssue({ title, body: buildFindingsBody(owner, repo, newFindings, commit) });
+            issueNumber = created && created.number;
+            issueUrl = (created && created.html_url) || "";
+            for (const f of newFindings) issueRefs.push({ finding: f, issueNumber, issueUrl });
+          } else {
+            for (const f of newFindings) {
+              const created = await api.createIssue({
+                title: `[安全扫描] ${owner}/${repo}：${f.severity} ${f.title}`,
+                body: buildFindingsBody(owner, repo, [f], commit),
+              });
+              issueRefs.push({ finding: f, issueNumber: created && created.number, issueUrl: (created && created.html_url) || "" });
+            }
+          }
+        }
+        // 记录去重状态（dry-run 不标记 reported，正式跑时可上报）
+        if (!opts.dryRun && issueRefs.length) {
+          state.reported[key] = state.reported[key] || {};
+          for (const ref of issueRefs) {
+            const sig = findingSig(ref.finding);
+            state.reported[key][sig] = {
+              vulnType: ref.finding.vulnType, severity: ref.finding.severity, title: ref.finding.title,
+              file: ref.finding.file, line: ref.finding.line,
+              description: (ref.finding.description || "").slice(0, 2000),
+              suggestion: (ref.finding.suggestion || "").slice(0, 1000),
+              issueNumber: ref.issueNumber, issueUrl: ref.issueUrl, reportedAt: Date.now(), commit,
+            };
+          }
+        }
+        state.runs[key] = {
+          at: Date.now(), commit, durationMs: Date.now() - job.startedAt,
+          found: findings.length, reported: newFindings.length, duplicates: dupCount,
+          note: note || "", dryRun: !!opts.dryRun, issueNumber,
+          workerSummary: (summary.text || "").slice(0, 500),
+        };
+        saveScanState(state);
+        update({ status: "done", detail: "found=" + findings.length + " new=" + newFindings.length + " issue=" + (issueNumber || (opts.dryRun ? "dry-run" : "none")), issueNumber, issueUrl });
+        console.log("[gitee-ai] scan done: " + key + " found=" + findings.length + " new=" + newFindings.length + " issue=" + (issueNumber || "none"));
+        return { ok: true, key, scanned: findings.length, new: newFindings.length, issueNumber, issueUrl, commit, dryRun: !!opts.dryRun, note };
+      } catch (e) {
+        state.runs[key] = { at: Date.now(), error: String((e && e.message) || e) };
+        saveScanState(state);
+        update({ status: "failed", detail: String((e && e.message) || e) });
+        console.error("[gitee-ai] scan error: " + key, e);
+        return { failed: true, error: String((e && e.message) || e) };
+      } finally {
+        scanActive.delete(key);
+      }
+    }
+
+    function scanJobsList() {
+      const rows = [];
+      for (const job of scanJobs.values()) {
+        rows.push({ key: job.key, status: job.status, step: job.step, startedAt: job.startedAt, dryRun: job.dryRun, issueNumber: job.issueNumber, detail: (job.detail || "").slice(0, 300) });
+      }
+      return rows.slice(-30).reverse();
+    }
+    function scanStateSummary() {
+      const s = loadScanState();
+      const out = {};
+      for (const key of Object.keys(s.reported || {})) {
+        const list = Object.values(s.reported[key] || {});
+        const bySeverity = {};
+        for (const r of list) bySeverity[r.severity] = (bySeverity[r.severity] || 0) + 1;
+        out[key] = { reported: list.length, bySeverity, lastRun: s.runs && s.runs[key] };
+      }
+      const runs = {};
+      for (const key of Object.keys(s.runs || {})) runs[key] = s.runs[key];
+      return { reported: out, runs };
+    }
+
+    // ── 扫描调度：并发受限的持续队列 ──────────────────────────────────────
+    // scanRepos 可配任意多个仓库：定时 tick 把全部仓库排进 scanQueue，
+    // 同时最多执行 scanConcurrency 个（默认 3），一个扫完自动接下一个，
+    // 队列一路排到底把整个列表扫完；重复扫描由 scan-state.json 去重保持幂等。
+    function scanConcurrencyLimit() {
+      const n = Number(config.scanConcurrency);
+      return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 8) : 3;
+    }
+    function scanQueuedOrActive(key) {
+      if (scanActive.has(key)) return true;
+      return scanQueue.some((q) => q.key === key);
+    }
+    function scanEnqueue(platform, owner, repo, opts = {}) {
+      const p = normPlatform(platform);
+      const key = owner + "/" + repo;
+      if (!tokenOkFor(p)) return { accepted: false, reason: "no-token", key };
+      if (scanActive.has(key)) return { accepted: false, reason: "busy", key };
+      if (scanQueue.some((q) => q.key === key)) return { accepted: false, reason: "queued", key };
+      const job = {
+        key, platform: p, status: "queued", step: "waiting",
+        queuedAt: Date.now(), updatedAt: Date.now(), detail: "",
+        dryRun: !!opts.dryRun, force: !!opts.force,
+      };
+      scanQueue.push({ key, platform: p, owner, repo, opts });
+      scanJobs.set(key, job);
+      scanPump();
+      return { accepted: true, key, queued: true };
+    }
+    function scanPump() {
+      while (scanActive.size < scanConcurrencyLimit() && scanQueue.length > 0) {
+        const item = scanQueue.shift();
+        if (!item) continue;
+        if (scanActive.has(item.key)) continue;
+        const job = scanJobs.get(item.key);
+        if (job) { job.status = "starting"; job.updatedAt = Date.now(); }
+        void scanRepo(item.platform, item.owner, item.repo, item.opts || {})
+          .catch((e) => console.error("[gitee-ai] scan task error " + item.key + ":", String((e && e.message) || e)))
+          .finally(() => scanPump());
+      }
+    }
+    function scanQueueSummary() {
+      return {
+        length: scanQueue.length,
+        active: scanActive.size,
+        concurrency: scanConcurrencyLimit(),
+        items: scanQueue.map((q) => q.key),
+      };
+    }
+
+    // 定时扫描：scanEnabled 时按 scanIntervalMs 把 scanRepos 全部排进队列持续扫描。
+    // 去重让重复扫描是幂等的：同一位置同类问题不会重复建 issue。
+    async function scanPollOnce() {
+      if (!config.scanEnabled) return;
+      const repos = Array.isArray(config.scanRepos) ? config.scanRepos : [];
+      let added = 0;
+      for (const spec of repos) {
+        const parsed = parseRepoSpec(spec);
+        if (!parsed) { console.log("[gitee-ai] scan: bad repo spec '" + spec + "', skip"); continue; }
+        const { platform: p, owner, repo: rname } = parsed;
+        if (!tokenOkFor(p)) { console.log("[gitee-ai] scan: " + p + " token missing for " + spec); continue; }
+        const key = owner + "/" + rname;
+        if (scanQueuedOrActive(key)) continue;
+        const r = scanEnqueue(p, owner, rname, {});
+        if (r && r.accepted) added++;
+      }
+      if (added > 0 || scanQueue.length > 0) {
+        console.log("[gitee-ai] scheduled scan enqueued +" + added + " (queued=" + scanQueue.length + ", active=" + scanActive.size + "/" + scanConcurrencyLimit() + ")");
+      }
+    }
+    function restartScanPolling() {
+      if (scanPollDisposer) { try { scanPollDisposer(); } catch (e) {} scanPollDisposer = null; }
+      if (config.scanEnabled && (tokenOk() || tokenOkFor("github"))) {
+        scanPollDisposer = timer.interval(() => { void scanPollOnce(); }, Math.max(60000, config.scanIntervalMs || 21600000));
+        console.log("[gitee-ai] scheduled scan every " + Math.round((config.scanIntervalMs || 21600000) / 60000) + "min for " + (config.scanRepos || []).length + " repo(s), concurrency=" + scanConcurrencyLimit());
+        void scanPollOnce();
+      } else {
+        console.log("[gitee-ai] scheduled scan off");
+      }
     }
 
     // ── 从 issue 文本解析目标分支 ──
@@ -707,6 +1249,7 @@ export default {
     function settingsHtml(err, ok) {
       const c = config;
       const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+      const toJson = (v) => { try { return v ? JSON.stringify(v, null, 2) : ""; } catch (e) { return ""; } };
       const tokenVal = c.giteeToken ? "已配置（" + c.botName + "）" : "";
       return `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>Gitee AI 员工 · 设置</title>
 <style>
@@ -752,9 +1295,52 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
 <div class="check"><input type="checkbox" name="autoCloseIssue" ${c.autoCloseIssue ? "checked" : ""}><span>成功后自动关闭 issue</span></div>
 <div class="hint">保存后本进程立即生效，同时写入 patch 文件（重启后同样生效）。</div>
 </div>
+<div class="card"><h2>代码安全扫描（v1.2）</h2>
+<div class="check"><input type="checkbox" name="scanEnabled" ${c.scanEnabled ? "checked" : ""}><span>启用定时扫描（把下方全部仓库排进队列，周期持续扫描，去重幂等）</span></div>
+<label>扫描仓库（[gitee:|github:]owner/repo，每行一个）</label>
+<div style="display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap"><button type="button" id="scanFetchRepos" style="background:#2f6fed;color:#fff;border:0;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">一键获取我的仓库</button><span id="scanFetchNote" style="color:#8b949e;font-size:12px">拉取自己有权限的仓库（含所属组织）填入下方，去掉不需要的再保存</span></div>
+<textarea name="scanRepos" id="scanReposInput" rows="6" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:13px">${esc(Array.isArray(c.scanRepos) ? c.scanRepos.join("\n") : "")}</textarea>
+<label>最低上报级别</label><select name="scanMinSeverity" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:14px">
+${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}" ${(c.scanMinSeverity || "medium") === s ? "selected" : ""}>${s}</option>`).join("")}
+</select>
+<div class="check"><input type="checkbox" name="scanOneIssuePerRun" ${c.scanOneIssuePerRun !== false ? "checked" : ""}><span>一次扫描的新发现合并为一个 issue</span></div>
+<label>同时扫描的仓库数（并发上限 1~8，默认 3；配很多仓库时自动排成队列逐个持续扫描）</label><input type="number" name="scanConcurrency" min="1" max="8" value="${esc(c.scanConcurrency || 3)}">
+<label>扫描间隔（毫秒，默认 21600000 = 6 小时）</label><input type="number" name="scanIntervalMs" value="${esc(c.scanIntervalMs || 21600000)}">
+<label>自定义/覆盖提示词（JSON：{"id":{"name":"名称","prompt":"提示词"}}，留空用内置）</label><textarea name="scanPrompts" rows="5" style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2a313c;border-radius:8px;color:#e6e8ec;padding:8px 10px;font-size:12px;font-family:Consolas,monospace">${esc(toJson(c.scanPrompts))}</textarea>
+<div class="hint">内置提示词 id：general / sqli / xss / command-injection / path-traversal / ssrf / hardcoded-secret / insecure-deserialization / authz / dos / dependency。填相同 id 即覆盖内置，自定义 id 即新增。</div>
+<div class="hint">手动触发：<span class="mono">POST /gitee-ai/scan {owner,repo}</span>（dryRun=true 不建 issue；多仓库自动排队）；结果/状态见 <span class="mono">GET /gitee-ai/scan</span> 与 workRoot/scan-state.json</div>
+</div>
 <button type="submit">保存配置</button>
 </form>
 <p class="hint">状态查询：<span class="mono">/gitee-ai-status</span>（JSON）</p>
+<script>
+(function () {
+  function normLine(s) { return String(s || '').replace(/^(gitee|github):/i, '').toLowerCase(); }
+  var btn = document.getElementById('scanFetchRepos');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var ta = document.getElementById('scanReposInput');
+    var note = document.getElementById('scanFetchNote');
+    btn.disabled = true; btn.textContent = '获取中…';
+    fetch('/gitee-ai/my-repos')
+      .then(function (r) { return r.json().catch(function () { return { ok: false, error: '响应异常' }; }); })
+      .then(function (b) {
+        if (!b.ok || !Array.isArray(b.repos)) { note.textContent = '获取失败：' + ((b && b.error) || '未知错误'); return; }
+        var cur = (ta.value || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+        var seen = {}; cur.forEach(function (s) { seen[normLine(s)] = true; });
+        var lines = cur.slice();
+        b.repos.forEach(function (x) {
+          var line = x.platform + ':' + x.owner + '/' + x.repo;
+          if (!seen[normLine(line)]) { lines.push(line); seen[normLine(line)] = true; }
+        });
+        ta.value = lines.join('\n');
+        note.textContent = '已填入 ' + b.repos.length + ' 个仓库（含既有保留，请去掉不需要的再保存）';
+      })
+      .catch(function (e) { note.textContent = '获取失败：' + String(e.message || e); })
+      .finally(function () { btn.disabled = false; btn.textContent = '一键获取我的仓库'; });
+  });
+})();
+</script>
 </div></body></html>`;
     }
 
@@ -775,6 +1361,27 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
           next.pollEnabled = form.pollEnabled === "on";
           next.autoMerge = form.autoMerge === "on";
           next.autoCloseIssue = form.autoCloseIssue === "on";
+          // ── 扫描字段 ──
+          next.scanEnabled = form.scanEnabled === "on";
+          next.scanRepos = (form.scanRepos || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          if (form.scanMinSeverity && ["critical", "high", "medium", "low", "none"].includes(form.scanMinSeverity)) next.scanMinSeverity = form.scanMinSeverity;
+          next.scanOneIssuePerRun = form.scanOneIssuePerRun === "on";
+          if (form.scanConcurrency) next.scanConcurrency = Math.min(Math.max(Number(form.scanConcurrency) || 3, 1), 8);
+          if (form.scanIntervalMs) next.scanIntervalMs = Number(form.scanIntervalMs) || next.scanIntervalMs;
+          if (form.scanPrompts && form.scanPrompts.trim()) {
+            try {
+              const parsed = JSON.parse(form.scanPrompts);
+              const sp = {};
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                for (const [id, v] of Object.entries(parsed)) {
+                  const name = String((v && v.name) || "").trim();
+                  const prompt = String((v && v.prompt) || "").trim();
+                  if (name && prompt) sp[id] = { name, prompt };
+                }
+                next.scanPrompts = sp;
+              }
+            } catch (e) { /* 提示词解析失败则保持原值 */ }
+          }
           const p = await saveConfigToPatch(next);
           // 内存中立即更新（本进程生效），并重启轮询
           config.giteeToken = next.giteeToken;
@@ -787,7 +1394,15 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
           config.pollEnabled = next.pollEnabled;
           config.autoMerge = next.autoMerge;
           config.autoCloseIssue = next.autoCloseIssue;
+          config.scanEnabled = next.scanEnabled;
+          config.scanRepos = next.scanRepos;
+          config.scanMinSeverity = next.scanMinSeverity;
+          config.scanOneIssuePerRun = next.scanOneIssuePerRun;
+          config.scanConcurrency = next.scanConcurrency;
+          config.scanIntervalMs = next.scanIntervalMs;
+          config.scanPrompts = next.scanPrompts;
           restartPolling();
+          restartScanPolling();
           res.writeHead(302, { Location: "/gitee-ai/settings?ok=" + encodeURIComponent("已保存到 " + p + "（本进程已生效；重启 DSH 后同样生效）") });
           res.end();
           return;
@@ -957,6 +1572,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
       if (hookDisposer) try { hookDisposer(); } catch (e) {}
       if (goDisposer) try { goDisposer(); } catch (e) {}
       if (pollDisposer) try { pollDisposer(); } catch (e) {}
+      if (scanPollDisposer) try { scanPollDisposer(); } catch (e) {}
     });
     console.log("[gitee-ai] webhook at " + (finalHookPath || "UNAVAILABLE") + " | manual trigger at " + (finalGoPath || "UNAVAILABLE"));
 
@@ -1001,6 +1617,107 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
       console.log("[gitee-ai] status endpoint at " + finalStatusPath);
     }
 
+    // ── 扫描 API（固定路径，client 设置卡片调用）──
+    //   POST /gitee-ai/scan {platform?,owner,repo,dryRun?,force?,prompts?,customPrompt?}
+    //   GET  /gitee-ai/scan → 提示词清单 + 扫描任务 + 去重状态
+    let scanApiDisposer = null;
+    if (webServer) {
+      try {
+        scanApiDisposer = webServer.register({
+          kind: "exact",
+          path: "/gitee-ai/scan",
+          handler: async (req, res) => {
+            const method = (req.method || "GET").toUpperCase();
+            if (method === "POST") {
+              try {
+                const raw = await readBody(req);
+                let body = {};
+                const ct = (req.headers["content-type"] || "").toLowerCase();
+                if (ct.includes("application/json")) {
+                  try { body = JSON.parse(raw || "{}"); } catch (e) { body = {}; }
+                } else if (raw) body = parseForm(raw);
+                const platform = normPlatform(body.platform || config.defaultPlatform);
+                const owner = String(body.owner || "").trim();
+                const repo = String(body.repo || "").trim();
+                if (!owner || !repo) { send(res, 400, { ok: false, error: "owner/repo required" }); return; }
+                const opts = {
+                  dryRun: body.dryRun === true || body.dryRun === "true",
+                  force: body.force === true || body.force === "true",
+                  prompts: Array.isArray(body.prompts) ? body.prompts.map(String) : undefined,
+                  customPrompt: typeof body.customPrompt === "string" ? body.customPrompt : undefined,
+                };
+                const key = owner + "/" + repo;
+                const enc = scanEnqueue(platform, owner, repo, opts);
+                if (!enc.accepted) {
+                  send(res, 200, { ok: true, accepted: false, reason: enc.reason, key, queue: scanQueueSummary() });
+                  return;
+                }
+                console.log("[gitee-ai] scan enqueued: " + key + " dryRun=" + opts.dryRun + " (queued=" + scanQueue.length + ", active=" + scanActive.size + "/" + scanConcurrencyLimit() + ")");
+                send(res, 200, { ok: true, accepted: true, key, dryRun: opts.dryRun, queued: true, queue: scanQueueSummary(), note: "已入队，同时最多扫描 " + scanConcurrencyLimit() + " 个仓库，扫完自动接下一个；状态见 GET /gitee-ai/scan" });
+              } catch (e) {
+                console.error("[gitee-ai] scan handler error:", e);
+                send(res, 500, { ok: false, error: String((e && e.message) || e) });
+              }
+              return;
+            }
+            const prompts = Object.assign({}, BUILTIN_SCAN_PROMPTS, config.scanPrompts || {});
+            send(res, 200, { ok: true, config: scanConfigSummary(), prompts, jobs: scanJobsList(), state: scanStateSummary(), queue: scanQueueSummary() });
+          },
+        });
+      } catch (e) {
+        console.error("[gitee-ai] cannot register scan api:", (e && e.message) || e);
+        scanApiDisposer = null;
+      }
+      if (scanApiDisposer) {
+        ctx.on("dispose", () => { try { scanApiDisposer(); } catch (e) {} });
+        console.log("[gitee-ai] scan api at /gitee-ai/scan");
+      }
+
+      // ── 我的仓库 API：一键拉取当前账号有权限的仓库（填 scanRepos 后人工勾选）──
+      //   GET /gitee-ai/my-repos?platform=gitee|github（缺省：全部已配 token 的平台）
+      let myReposApiDisposer = null;
+      if (webServer) {
+        try {
+          myReposApiDisposer = webServer.register({
+            kind: "exact",
+            path: "/gitee-ai/my-repos",
+            handler: async (req, res) => {
+              try {
+                const q = queryParams(req.url || "");
+                const want = normPlatform((q.platform || "").trim());
+                const platforms = [];
+                if (want && (want === "gitee" || want === "github")) {
+                  platforms.push(want);
+                } else {
+                  if (tokenOkFor("gitee")) platforms.push("gitee");
+                  if (tokenOkFor("github")) platforms.push("github");
+                }
+                if (!platforms.length) { send(res, 200, { ok: false, error: "未配置 gitee/github 令牌" }); return; }
+                const repos = [];
+                const errors = [];
+                for (const p of platforms) {
+                  const r = await fetchMyRepos(p);
+                  if (r.ok) repos.push(...r.repos);
+                  else errors.push(p + ": " + r.error);
+                }
+                send(res, 200, { ok: true, total: repos.length, repos, errors });
+              } catch (e) {
+                console.error("[gitee-ai] my-repos handler error:", e);
+                send(res, 500, { ok: false, error: String((e && e.message) || e) });
+              }
+            },
+          });
+        } catch (e) {
+          console.error("[gitee-ai] cannot register my-repos api:", (e && e.message) || e);
+          myReposApiDisposer = null;
+        }
+        if (myReposApiDisposer) {
+          ctx.on("dispose", () => { try { myReposApiDisposer(); } catch (e) {} });
+          console.log("[gitee-ai] my-repos api at /gitee-ai/my-repos");
+        }
+      }
+    }
+
     // ── 固定 JSON 配置 API（client 设置卡片读写；GET 读、POST 保存）──
     let configApiDisposer = null;
     if (webServer) {
@@ -1031,9 +1748,30 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
               if (typeof body.autoCloseIssue === "boolean") next.autoCloseIssue = body.autoCloseIssue;
               if (typeof body.defaultPlatform === "string") next.defaultPlatform = normPlatform(body.defaultPlatform);
               if (typeof body.githubToken === "string" && body.githubToken.trim()) next.githubToken = body.githubToken.trim();
+              // ── 扫描配置 ──
+              if (typeof body.scanEnabled === "boolean") next.scanEnabled = body.scanEnabled;
+              if (Array.isArray(body.scanRepos)) next.scanRepos = body.scanRepos.map(String).map(s => s.trim()).filter(Boolean);
+              if (typeof body.scanMinSeverity === "string") {
+                const v = String(body.scanMinSeverity).toLowerCase();
+                if (["critical", "high", "medium", "low", "none"].includes(v)) next.scanMinSeverity = v;
+              }
+              if (typeof body.scanOneIssuePerRun === "boolean") next.scanOneIssuePerRun = body.scanOneIssuePerRun;
+              if (body.scanPrompts && typeof body.scanPrompts === "object" && !Array.isArray(body.scanPrompts)) {
+                const sp = {};
+                for (const [id, v] of Object.entries(body.scanPrompts)) {
+                  const name = String((v && v.name) || "").trim();
+                  const prompt = String((v && v.prompt) || "").trim();
+                  if (name && prompt) sp[id] = { name, prompt };
+                }
+                next.scanPrompts = sp;
+              }
+              if (body.scanIntervalMs !== undefined) next.scanIntervalMs = Number(body.scanIntervalMs) || next.scanIntervalMs;
+              if (body.scanTimeoutMs !== undefined) next.scanTimeoutMs = Number(body.scanTimeoutMs) || next.scanTimeoutMs;
+              if (body.scanConcurrency !== undefined) next.scanConcurrency = Math.min(Math.max(Number(body.scanConcurrency) || 3, 1), 8);
               const savedTo = await saveConfigToPatch(next);
               Object.assign(config, next);
               restartPolling();
+              restartScanPolling();
               send(res, 200, { ok: true, savedTo, config: configSummary() });
             } catch (e) {
               console.error("[gitee-ai] config save error:", e);
@@ -1078,6 +1816,20 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
         gitUser: config.gitUser || "", pollEnabled: !!config.pollEnabled,
         pollIntervalMs: config.pollIntervalMs,
         watchRepos: Array.isArray(config.watchRepos) ? config.watchRepos : [],
+        ...scanConfigSummary(),
+      };
+    }
+    function scanConfigSummary() {
+      return {
+        scanEnabled: !!config.scanEnabled,
+        scanRepos: Array.isArray(config.scanRepos) ? config.scanRepos : [],
+        scanMinSeverity: config.scanMinSeverity || "medium",
+        scanOneIssuePerRun: config.scanOneIssuePerRun !== false,
+        scanPrompts: config.scanPrompts || {},
+        scanWorkerPreset: config.scanWorkerPreset || "gitee-scanner",
+        scanIntervalMs: config.scanIntervalMs || 21600000,
+        scanTimeoutMs: config.scanTimeoutMs || 1800000,
+        scanConcurrency: scanConcurrencyLimit(),
       };
     }
     function lastJobs() {
@@ -1090,6 +1842,7 @@ ${ok ? `<div class="ok">${esc(ok)}</div>` : ""}
 
     // ── 启动轮询（如有配置）──
     restartPolling();
-    console.log("[gitee-ai] plugin ready (composition). tokenConfigured=" + tokenOk() + " polling=" + config.pollEnabled);
+    restartScanPolling();
+    console.log("[gitee-ai] plugin ready (composition). tokenConfigured=" + tokenOk() + " polling=" + config.pollEnabled + " scan=" + config.scanEnabled);
   },
 };

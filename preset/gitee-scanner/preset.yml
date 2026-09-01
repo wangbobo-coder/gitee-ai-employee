@@ -1,0 +1,3 @@
+name: Gitee AI 员工 (安全扫描)
+description: Gitee AI 员工代码安全扫描 Agent 预设：由 Gitee AI 员工插件（v1.2+）动态挂载，对克隆的仓库做静态安全审计并按结构化结果写回。请勿手动单独挂载。
+order: 91
