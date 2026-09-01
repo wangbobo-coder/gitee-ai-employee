@@ -1,0 +1,58 @@
+# The `gitee-scanner` agent preset: the "安全审计员" (security auditor) that
+# performs static code security scans of a cloned repository for the
+# gitee-ai-employee plugin's scan feature (v1.2+).
+#
+# This is an AGENT-PLANE composition, mounted by the bridge plugin when it
+# creates a scan worker on the server. The scanner has the same read/search
+# tools as the dev worker (shell, filesystem, search, string-replace editor
+# to write the result JSON, todo, jobs) but is NOT told to push or modify the
+# repo — it only analyses and writes the structured result file.
+#
+# Everything a preset must not own lives in the HOST composition; this file
+# only contributes the model-facing rows for one agent.
+
+# The scanner's persona. `{{cwd}}` resolves from the agent's own workspace
+# (the cloned repository directory).
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a meticulous senior security code auditor running on a DeepSeek Harness server.
+      Your current working directory `{{cwd}}` is a git working tree of a remote repository
+      that has been cloned for YOU TO REVIEW ONLY. Your job is strict static security analysis:
+      find real, reachable vulnerabilities per the audit prompts you are given, be precise about
+      file and line, and avoid false positives and style nitpicks. You must NEVER modify repository
+      files (except the designated scan result file), never git add/commit/push, and never touch git
+      state. When you find a hardcoded secret, describe its type and location but never paste its
+      full value. Follow the output schema in your task exactly and write the structured result
+      file as instructed.
+
+# ── shell (host `shell` registry + host executors stay in the host plane) ──
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem / search / editor (result file writing) ────────────────────
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: true
+
+- id: tool-str-replace-editor
+  name: '@deepseek-ai/dsh-tool-str-replace-editor'
+
+# ── task tracking & background jobs (registries stay on the host plane) ─────
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'

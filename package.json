@@ -1,7 +1,7 @@
 {
   "name": "gitee-ai-employee",
-  "version": "1.1.2",
-  "description": "Gitee/GitHub AI 员工：在 issue 里 @ 机器人，它自动克隆仓库、按你指定的分支开发并提交 PR（可自动合并、自动关闭 issue）。An issue-driven AI developer for DeepSeek Harness (Gitee & GitHub): @ the bot on an issue, it clones the repo, implements on the branch you name, opens a PR, and can auto-merge and close.",
+  "version": "1.2.0",
+  "description": "Gitee/GitHub AI 员工：issue 里 @ 机器人自动开发并提 PR；v1.2 新增代码安全扫描——配置仓库地址后按内置/自定义提示词扫描漏洞，去重后提交 issue。An issue-driven AI developer for DeepSeek Harness (Gitee & GitHub) with optional static security scanning (dedup + issue reporting).",
   "license": "MIT",
   "type": "module",
   "main": "dsh/index.js",
@@ -11,7 +11,8 @@
     "./client": "./dsh/client.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./preset/gitee-worker/*": "./preset/gitee-worker/*"
+    "./preset/gitee-worker/*": "./preset/gitee-worker/*",
+    "./preset/gitee-scanner/*": "./preset/gitee-scanner/*"
   },
   "files": [
     "dsh",
@@ -35,12 +36,16 @@
     "dsh",
     "deepseek-harness",
     "gitee",
+    "github",
     "plugin",
     "bundle",
     "ai",
     "issue",
     "pull-request",
-    "automation"
+    "automation",
+    "security",
+    "vulnerability-scan",
+    "code-audit"
   ],
   "repository": {
     "type": "git",
