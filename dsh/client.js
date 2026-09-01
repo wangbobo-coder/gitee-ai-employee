@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
         merge: '自动合并 PR',
         close: '成功后自动关闭 issue',
         status: '查看任务状态',
+        issueBlock: '处理 Issue（自动开发 · 提 PR）',
         scan: '代码安全扫描',
         scanEnable: '启用定时扫描（全部仓库排队持续扫描，去重幂等）',
         scanReposLabel: '扫描仓库',
@@ -87,6 +88,28 @@ window.__ModuleLoader__.load({
               : null,
           ),
           control,
+        )
+
+      // 分区标题块：色条 + 标题 + 行为标签 + 说明，
+      // 用于把「处理 Issue」与「代码安全扫描」两个功能模块清楚分隔，防止误配置/误操作。
+      var sectionBlock = (label, sub, tag, tagBg, accent, key) =>
+        h('div', {
+          key: key,
+          style: {
+            margin: '16px 0 6px',
+            padding: '10px 12px',
+            borderRadius: '10px',
+            border: '1px solid ' + accent,
+            background: 'linear-gradient(90deg, ' + accent + '1A, transparent 75%)',
+            display: 'flex', flexDirection: 'column', gap: '4px',
+          },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+            h('span', { style: { width: '6px', height: '16px', borderRadius: '3px', background: accent, display: 'inline-block' } }),
+            h('span', { style: { fontSize: '14px', fontWeight: 800, color: 'var(--dsw-alias-label-primary)' } }, label),
+            tag ? h('span', { style: { fontSize: '11px', fontWeight: 700, color: '#fff', background: tagBg, borderRadius: '999px', padding: '2px 8px' } }, tag) : null,
+          ),
+          sub ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.45 } }, sub) : null,
         )
 
       // 自定义开关行：左侧标签，右侧紧凑的 iOS 风格 toggle
@@ -417,6 +440,10 @@ window.__ModuleLoader__.load({
             )
           } else {
             var controls = []
+            // ── 分区A：处理 Issue（真实操作仓库）──
+            controls.push(sectionBlock(t.issueBlock,
+              '监听 issue：@ 机器人后自动克隆仓库开发、推分支、提 PR，可自动合并 / 自动关闭。下面这些设置会真实操作你的仓库（改代码、推送分支、合并 PR），请仔细确认。',
+              '会真实操作仓库 · 自动提 PR', '#dc2626', '#3b82f6', 'issueBlock'))
             controls.push(fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
               key: 'token',
               type: 'password',
@@ -459,8 +486,10 @@ window.__ModuleLoader__.load({
             controls.push(toggleRow(t.merge, undefined, draft.autoMerge, (v) => setDraftFromControl({ autoMerge: v }), 'merge'))
             controls.push(toggleRow(t.close, undefined, draft.autoCloseIssue, (v) => setDraftFromControl({ autoCloseIssue: v }), 'close'))
 
-            // ── 代码安全扫描区（v1.2）──
-            controls.push(h('div', { key: 'scanTitle', className: 'At1oFq_label', style: { margin: '16px 0 4px', fontSize: '13px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t.scan))
+            // ── 分区B：代码安全扫描（只读审计）──
+            controls.push(sectionBlock(t.scan,
+              '对「扫描仓库」里的仓库做静态安全审计（克隆到本地、按内置/自定义提示词检查），发现新漏洞去重后提交 [安全扫描] issue。全程只读审计，不会改代码、不会提 PR。',
+              '只读审计 · 只提交漏洞 issue', '#059669', '#10b981', 'scanBlock'))
             controls.push(toggleRow(t.scanEnable, undefined, draft.scanEnabled, (v) => setDraftFromControl({ scanEnabled: v }), 'scanEnable'))
             controls.push(fieldRow(t.scanReposLabel, t.scanReposHint, h('textarea', {
               key: 'scanRepos', rows: 3,
