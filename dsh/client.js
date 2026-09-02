@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
         merge: '自动合并 PR',
         close: '成功后自动关闭 issue',
         status: '查看任务状态',
+        common: '连接与公共配置',
         issueBlock: '处理 Issue（自动开发 · 提 PR）',
         scan: '代码安全扫描',
         scanEnable: '启用定时扫描（全部仓库排队持续扫描，去重幂等）',
@@ -453,35 +454,44 @@ window.__ModuleLoader__.load({
             )
           } else {
             var controls = []
+            // ── 公共区：令牌 / 工作目录（两个功能模块共用，放最顶上）──
+            controls.push(sectionBlock(t.common,
+              'Gitee / GitHub 令牌与仓库工作目录同时供「处理 Issue」和「代码安全扫描」使用：扫描与开发都以令牌身份访问仓库，都在同一工作目录下克隆。',
+              '两个功能模块共用 · 修改需谨慎', '#64748b', '#64748b', 'commonBlock'))
+            var commonFields = []
+            commonFields.push(h('div', { key: 'tokenRow', style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '12px', padding: '12px 0 2px' } },
+              fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
+                key: 'token',
+                type: 'password',
+                placeholder: draft.tokenConfigured ? '••••••••（留空保持原值）' : '输入 Gitee 私人令牌',
+                value: (draft.token !== undefined ? draft.token : ''),
+                onChange: (e) => setDraftFromControl({ token: e.target.value }),
+              }), 'token'),
+              fieldRow('GitHub 令牌（可选）', '留空保持原值；用于 github: 前缀仓库', h(Input, {
+                key: 'githubToken',
+                type: 'password',
+                placeholder: draft.githubTokenConfigured ? '••••••••（留空保持原值）' : '输入 GitHub 私人令牌（可选）',
+                value: (draft.githubToken !== undefined ? draft.githubToken : ''),
+                onChange: (e) => setDraftFromControl({ githubToken: e.target.value }),
+              }), 'githubToken'),
+            ))
+            commonFields.push(fieldRow(t.workRoot, undefined, h(Input, {
+              key: 'workRoot',
+              value: draft.workRoot || '',
+              onChange: (e) => setDraftFromControl({ workRoot: e.target.value }),
+            }), 'workRoot'))
+            controls.push(innerCard('commonCard', '#64748b', commonFields))
+
             // ── 分区A：处理 Issue（真实操作仓库）──
             controls.push(sectionBlock(t.issueBlock,
               '监听 issue：@ 机器人后自动克隆仓库开发、推分支、提 PR，可自动合并 / 自动关闭。下面这些设置会真实操作你的仓库（改代码、推送分支、合并 PR），请仔细确认。',
               '会真实操作仓库 · 自动提 PR', '#dc2626', '#3b82f6', 'issueBlock'))
             var issueFields = []
-            issueFields.push(fieldRow(t.token, draft.tokenConfigured ? t.tokenHint : undefined, h(Input, {
-              key: 'token',
-              type: 'password',
-              placeholder: draft.tokenConfigured ? '••••••••（留空保持原值）' : '输入 Gitee 私人令牌',
-              value: (draft.token !== undefined ? draft.token : ''),
-              onChange: (e) => setDraftFromControl({ token: e.target.value }),
-            }), 'token'))
-            issueFields.push(fieldRow('GitHub 令牌（可选）', '留空保持原值；用于 github: 前缀的仓库', h(Input, {
-              key: 'githubToken',
-              type: 'password',
-              placeholder: draft.githubTokenConfigured ? '••••••••（留空保持原值）' : '输入 GitHub 私人令牌（可选）',
-              value: (draft.githubToken !== undefined ? draft.githubToken : ''),
-              onChange: (e) => setDraftFromControl({ githubToken: e.target.value }),
-            }), 'githubToken'))
             issueFields.push(fieldRow(t.bot, t.botHint, h(Input, {
               key: 'bot',
               value: draft.botName || '',
               onChange: (e) => setDraftFromControl({ botName: e.target.value }),
             }), 'bot'))
-            issueFields.push(fieldRow(t.workRoot, undefined, h(Input, {
-              key: 'workRoot',
-              value: draft.workRoot || '',
-              onChange: (e) => setDraftFromControl({ workRoot: e.target.value }),
-            }), 'workRoot'))
             issueFields.push(fieldRow(t.repos, t.reposHint, h('textarea', {
               key: 'repos',
               rows: 3,
