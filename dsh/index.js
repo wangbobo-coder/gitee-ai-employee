@@ -25,6 +25,12 @@ import { join } from "node:path";
 // 路径分隔符：Windows 用反斜杠，mac / linux 用正斜杠（保证跨平台路径正确）。
 const PATH_SEP = (typeof process !== "undefined" && process.platform === "win32") ? "\\" : "/";
 
+// 插件自身版本（读包内 package.json），用于启动日志 / 状态接口自报，
+// 便于在运行日志里一眼确认当前加载的到底是不是最新版。
+const PLUGIN_VERSION = (() => {
+  try { return JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).version || "?"; } catch (e) { return "?"; }
+})();
+
 const DEFAULT_CONFIG = {
   giteeToken: "",
   githubToken: "",
@@ -171,7 +177,7 @@ export default {
     let webServer = ctx.get("webServer");
     const shell = ctx.shell;
     const timer = ctx.timer;
-    console.log("[gitee-ai] apply(composition) services ok: agents/shell/timer available; webServer=" + (webServer ? "yes" : "no") + " agentDefaultModel=" + (agentDefaultModel ? "yes" : "no"));
+    console.log("[gitee-ai] plugin v" + PLUGIN_VERSION + " loaded | " + ((typeof process !== "undefined" && process.platform) || "?") + " | node " + ((typeof process !== "undefined" && process.version) || "?"));
     ensureWorkerPreset();
 
     // ── 提示词归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态 ──
@@ -1662,7 +1668,7 @@ ${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}"
     }
 
     // ── 扫描 API（固定路径，client 设置卡片调用）──
-    //   POST /gitee-ai/scan {platform?,owner,repo,dryRun?,force?,prompts?,customPrompt?}
+    //   POST /gitee-ai/scan {spec}（原始仓库行，统一解析）或 {platform?,owner,repo,dryRun?,force?,prompts?,customPrompt?}
     //   GET  /gitee-ai/scan → 提示词清单 + 扫描任务 + 去重状态
     let scanApiDisposer = null;
     if (webServer) {
@@ -1680,9 +1686,22 @@ ${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}"
                 if (ct.includes("application/json")) {
                   try { body = JSON.parse(raw || "{}"); } catch (e) { body = {}; }
                 } else if (raw) body = parseForm(raw);
-                const platform = normPlatform(body.platform || config.defaultPlatform);
-                const owner = String(body.owner || "").trim();
-                const repo = String(body.repo || "").trim();
+                let platform = normPlatform(body.platform || config.defaultPlatform);
+                let owner = String(body.owner || "").trim();
+                let repo = String(body.repo || "").trim();
+                // 支持直接传原始仓库行（client「立即扫描全部仓库」就是传 spec 行）：
+                // 统一走 parseRepoSpec，兼容 owner/repo、gitee:/github: 前缀、完整克隆地址。
+                // （不能在这里对 URL 用 indexOf('/') 切分——会把 https://… 切成 owner='https:'）
+                if (body.spec !== undefined && String(body.spec).trim()) {
+                  const parsed = parseRepoSpec(String(body.spec));
+                  if (!parsed) {
+                    send(res, 400, { ok: false, error: "无法解析仓库：" + String(body.spec) + "（支持 owner/repo、gitee:owner/repo、完整克隆地址）" });
+                    return;
+                  }
+                  platform = parsed.platform;
+                  owner = parsed.owner;
+                  repo = parsed.repo;
+                }
                 if (!owner || !repo) { send(res, 400, { ok: false, error: "owner/repo required" }); return; }
                 const opts = {
                   dryRun: body.dryRun === true || body.dryRun === "true",
@@ -1856,6 +1875,7 @@ ${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}"
         workRoot: config.workRoot, autoMerge: config.autoMerge,
         autoCloseIssue: !!config.autoCloseIssue, tokenConfigured: tokenOk(),
         githubTokenConfigured: tokenOkFor("github"),
+        version: PLUGIN_VERSION,
         defaultPlatform: config.defaultPlatform || "gitee",
         gitUser: config.gitUser || "", pollEnabled: !!config.pollEnabled,
         pollIntervalMs: config.pollIntervalMs,
