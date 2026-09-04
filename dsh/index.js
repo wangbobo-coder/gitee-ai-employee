@@ -22,6 +22,9 @@ import { fileURLToPath } from "node:url";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
+// 路径分隔符：Windows 用反斜杠，mac / linux 用正斜杠（保证跨平台路径正确）。
+const PATH_SEP = (typeof process !== "undefined" && process.platform === "win32") ? "\\" : "/";
+
 const DEFAULT_CONFIG = {
   giteeToken: "",
   githubToken: "",
@@ -371,12 +374,12 @@ export default {
         }
       }
       const stamp = Date.now() + "-" + (++apiSeq);
-      const outFile = config.tmpDir + "\\gitee-out-" + stamp + ".json";
-      const codeFile = config.tmpDir + "\\gitee-code-" + stamp + ".txt";
+      const outFile = config.tmpDir + PATH_SEP + "gitee-out-" + stamp + ".json";
+      const codeFile = config.tmpDir + PATH_SEP + "gitee-code-" + stamp + ".txt";
       let cmd;
       if (body !== undefined && body !== null) {
         const b64 = Buffer.from(JSON.stringify(body), "utf8").toString("base64");
-        const tmp = config.tmpDir + "\\gitee-body-" + stamp + ".json";
+        const tmp = config.tmpDir + PATH_SEP + "gitee-body-" + stamp + ".json";
         cmd = `[IO.File]::WriteAllText('${tmp}', [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}')), (New-Object System.Text.UTF8Encoding($false))); & 'C:\\Windows\\System32\\curl.exe' -sS -o '${outFile}' -w '%{http_code}' -X ${method} '${url}' -H 'Content-Type: application/json' -H 'Authorization: token ${token}' -d '@${tmp}' | Set-Content -Encoding ASCII '${codeFile}'`;
       } else {
         cmd = `& 'C:\\Windows\\System32\\curl.exe' -sS -o '${outFile}' -w '%{http_code}' '${url}' -H 'Authorization: token ${token}' | Set-Content -Encoding ASCII '${codeFile}'`;
@@ -480,10 +483,10 @@ export default {
       } catch (e) {
         diag.ok = false;
         diag.error = String((e && e.message) || e);
-        try { writeFileSync(config.tmpDir + "\\gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
+        try { writeFileSync(config.tmpDir + PATH_SEP + "gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
         return { ok: false, error: diag.error };
       }
-      try { writeFileSync(config.tmpDir + "\\gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
+      try { writeFileSync(config.tmpDir + PATH_SEP + "gitee-my-repos-" + p + "-last.json", JSON.stringify(diag, null, 2), "utf8"); } catch (e2) {}
       return { ok: true, repos: out };
     }
 
@@ -513,19 +516,16 @@ export default {
       return config.gitUser;
     }
 
-    function repoDir(owner, repo) { return config.workRoot + "\\" + owner + "\\" + repo; }
+    function repoDir(owner, repo) { return config.workRoot + PATH_SEP + owner + PATH_SEP + repo; }
     function shellQuote(v) { return `'${String(v).replace(/'/g, "''")}'`; }
     async function ensureRepo(platform, owner, repo) {
       const dir = repoDir(owner, repo);
-      try {
-        const probe = await sh(`if (Test-Path '${dir.replace(/'/g, "''")}\\.git') { 'yes' } else { 'no' }`, { timeoutMs: 15000 });
-        if ((probe.stdout.text || "").trim() === "yes") {
-          await sh(`git -C ${shellQuote(dir)} fetch origin --prune --tags`, { timeoutMs: 300000 });
-          return dir;
-        }
-      } catch (e) { /* fallthrough */ }
-      const parent = config.workRoot + "\\" + owner;
-      await sh(`New-Item -ItemType Directory -Force -Path ${shellQuote(parent)} | Out-Null`, { timeoutMs: 15000 });
+      // 跨平台检查是否已克隆：直接走文件系统，不依赖 PowerShell / shell 语法（mac / linux 亦可）
+      if (existsSync(dir + PATH_SEP + ".git")) {
+        await sh(`git -C ${shellQuote(dir)} fetch origin --prune --tags`, { timeoutMs: 300000 });
+        return dir;
+      }
+      mkdirSync(config.workRoot + PATH_SEP + owner, { recursive: true });
       const url = await cloneUrlFor(platform, owner, repo);
       const r = await sh(`git clone ${shellQuote(url)} ${shellQuote(dir)}`, { timeoutMs: 600000 });
       if (r.exitCode !== 0) {
@@ -677,8 +677,7 @@ export default {
     }
     async function readScanResult(resultFile) {
       try {
-        const r = await sh(`Get-Content -Raw -Path ${shellQuote(resultFile)} -ErrorAction SilentlyContinue`, { timeoutMs: 20000 });
-        const text = (r.stdout.text || "").trim();
+        const text = readFileSync(resultFile, "utf8").trim();
         if (!text) return { findings: [], note: "empty-result" };
         const parsed = JSON.parse(text);
         const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.findings) ? parsed.findings : []);
@@ -760,7 +759,6 @@ export default {
         const scanDir = join(dir, ".gitee-scan");
         const resultFile = join(scanDir, "result.json");
         try { mkdirSync(scanDir, { recursive: true }); } catch (e) {}
-        void sh(`New-Item -ItemType Directory -Force -Path ${shellQuote(scanDir)} | Out-Null`, { timeoutMs: 15000 }).catch(() => {});
         const taskText = buildScanTask({ p, owner, repo, dir, commit, prompts, resultFile });
         let summary;
         try {
