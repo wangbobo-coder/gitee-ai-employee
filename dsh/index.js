@@ -528,6 +528,10 @@ export default {
       const dir = repoDir(owner, repo);
       // 跨平台检查是否已克隆：直接走文件系统，不依赖 PowerShell / shell 语法（mac / linux 亦可）
       if (existsSync(dir + PATH_SEP + ".git")) {
+        // 复用旧克隆前，用「当前令牌」刷新 origin 地址。否则克隆时嵌入的旧令牌一旦失效，
+        // 后续 git push 会 401 失败（且曾被 sh() 静默吞掉 → PR 接口报“源分支不存在”）。
+        const fresh = await cloneUrlFor(platform, owner, repo);
+        await sh(`git -C ${shellQuote(dir)} remote set-url origin ${shellQuote(fresh)}`, { timeoutMs: 60000 }).catch(() => {});
         await sh(`git -C ${shellQuote(dir)} fetch origin --prune --tags`, { timeoutMs: 300000 });
         return dir;
       }
@@ -1070,7 +1074,14 @@ export default {
         }
 
         update({ step: "push" });
-        await sh(`git -C ${shellQuote(dir)} push -u origin ${shellQuote(branchName)}`, { workdir: dir, timeoutMs: 300000 });
+        // push 前再用当前令牌刷新 origin（克隆可能是旧令牌建的）；并检查 push 退出码，
+        // 失败立即抛明确错误，而不是静默继续导致 PR 接口报“源分支不存在”这类误导性 400。
+        const freshPushUrl = await cloneUrlFor(p, owner, repo);
+        await sh(`git -C ${shellQuote(dir)} remote set-url origin ${shellQuote(freshPushUrl)}`, { workdir: dir, timeoutMs: 60000 }).catch(() => {});
+        const pushRes = await sh(`git -C ${shellQuote(dir)} push -u origin ${shellQuote(branchName)}`, { workdir: dir, timeoutMs: 300000 });
+        if (pushRes && pushRes.exitCode !== 0) {
+          throw new Error("git push failed (" + pushRes.exitCode + "): " + ((pushRes.stderr.text || pushRes.stdout.text || "").slice(0, 300)));
+        }
 
         update({ step: "pr" });
         const prTitle = `[AI] ${(issue && issue.title) || ("Fix issue #" + number)} (#${number})`;
