@@ -359,16 +359,12 @@ window.__ModuleLoader__.load({
           var accepted = 0
           var skipped = 0
           var tasks = repos.map(function (spec) {
-            var platform = /^github:/i.test(spec) ? 'github' : /^gitee:/i.test(spec) ? 'gitee' : 'gitee'
-            var rest = spec.replace(/^(github|gitee):/i, '')
-            var idx = rest.indexOf('/')
-            var owner = rest.slice(0, idx)
-            var repo = rest.slice(idx + 1)
-            if (!owner || !repo) return Promise.resolve({ accepted: false })
+            // 原始仓库行交给服务端统一解析（owner/repo、gitee:owner/repo、完整克隆地址均可）。
+            // 客户端不再自己 indexOf 切分——全路径 URL 会被切成 owner='https:' 导致克隆失败。
             return fetch('/gitee-ai/scan', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ platform: platform, owner: owner, repo: repo, dryRun: false }),
+              body: JSON.stringify({ spec: spec, dryRun: false }),
             }).then(function (r) { return r.json().catch(function () { return { accepted: false } }) })
               .then(function (b) {
                 if (b && b.accepted) accepted++
