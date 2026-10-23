@@ -134,7 +134,28 @@ http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&numbe
 - `dsh/index.js` — host plugin (Cordis object plugin with `dsh.bundle` manifest).
 - `dsh/client.js` — web client half (settings card hover/status).
 - `preset/gitee-worker/` — the bundled worker agent preset, auto-copied to
-  `$DSH_HOME/.agent-presets/gitee-worker` on load if missing.
+  `$DSH_HOME/.agent-presets/gitee-worker` on load if missing (refreshed when the
+  bundled copy differs from the one already on disk).
+- `preset/gitee-scanner/` — the bundled security-scan agent preset (v1.2).
+
+## DSH compatibility (v1.3.1)
+
+v1.3.1 fixes "plugin loads fine but every worker/scan fails" on DSH 0.2.x. All three are
+follow-ups to host API changes:
+
+- **shell execution**: 0.2.x dropped `shell.run()`; use
+  `shell.execute(shell.resolve(req)).result()`. The old code threw
+  `shell.run is not a function`.
+- **agent preset registration**: 0.2.x `agentPresets` only honours an explicit
+  `register(definition)` and no longer scans `$DSH_HOME/.agent-presets`; the old code threw
+  `Unknown agent preset: gitee-scanner`. The plugin now both registers in code and writes
+  the preset directory (compatibility with older builds).
+- **persona config field**: `@deepseek-ai/dsh-persona` takes its body as `prefix`
+  (required), not `text`; `text` threw `$.prefix missing required value`.
+
+After upgrading, **restart the DSH process**. The plugin is installed as an npm package and
+a running process never re-imports new code from disk — toggling the plugin on/off is not
+enough.
 
 ## License
 

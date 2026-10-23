@@ -17,7 +17,7 @@
 import { Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import yaml from "yaml";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -159,7 +159,7 @@ export default {
   // ctx.get() 兜底读取（缺失时相应能力自动降级，插件仍可加载）。
   inject: ["agents", "agentPresets", "shell", "timer"],
 
-  apply(ctx, rawConfig) {
+  async apply(ctx, rawConfig) {
     // runtime.callback(ctx, config)：配置作为第二个参数传入（不是 ctx.config）
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || ctx.config || {}) };
     // scanPrompts 归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态
@@ -179,6 +179,7 @@ export default {
     const timer = ctx.timer;
     console.log("[gitee-ai] plugin v" + PLUGIN_VERSION + " loaded | " + ((typeof process !== "undefined" && process.platform) || "?") + " | node " + ((typeof process !== "undefined" && process.version) || "?"));
     ensureWorkerPreset();
+    await registerWorkerPresets();
 
     // ── 提示词归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态 ──
     function toPromptMap(v) {
@@ -238,22 +239,85 @@ export default {
       try {
         const presetDir = join(process.env.DSH_HOME || join(homedir(), ".dsh"), ".agent-presets", presetId);
         const target = join(presetDir, "agent.cordis.yml");
-        if (existsSync(target)) {
-          console.log("[gitee-ai] preset already present: " + presetDir);
-          return;
-        }
         const src = fileURLToPath(new URL("../preset/" + presetId + "/agent.cordis.yml", import.meta.url));
         if (!existsSync(src)) {
           console.error("[gitee-ai] bundled preset missing: " + src);
           return;
         }
+        const srcText = readFileSync(src, "utf8");
+        // 已落盘但内容与包内不一致（插件升级后 preset 有变更）时刷新覆盖，
+        // 否则老用户会永远停留在首次安装时的旧 preset 上。
+        if (existsSync(target)) {
+          const cur = readFileSync(target, "utf8");
+          if (cur === srcText) {
+            console.log("[gitee-ai] preset already present: " + presetDir);
+            return;
+          }
+          writeFileSync(target, srcText);
+          const srcMetaUpd = fileURLToPath(new URL("../preset/" + presetId + "/preset.yml", import.meta.url));
+          if (existsSync(srcMetaUpd)) writeFileSync(join(presetDir, "preset.yml"), readFileSync(srcMetaUpd, "utf8"));
+          console.log("[gitee-ai] preset refreshed -> " + presetDir);
+          return;
+        }
         mkdirSync(presetDir, { recursive: true });
-        copyFileSync(src, target);
+        writeFileSync(target, srcText);
         const srcMeta = fileURLToPath(new URL("../preset/" + presetId + "/preset.yml", import.meta.url));
-        if (existsSync(srcMeta)) copyFileSync(srcMeta, join(presetDir, "preset.yml"));
+        if (existsSync(srcMeta)) writeFileSync(join(presetDir, "preset.yml"), readFileSync(srcMeta, "utf8"));
         console.log("[gitee-ai] preset installed -> " + presetDir);
       } catch (e) {
         console.error("[gitee-ai] ensurePreset error (" + presetId + "):", String((e && e.message) || e));
+      }
+    }
+
+    // ── DSH 0.2.x：agentPresets 改为显式 register() 注册（不再扫描 .agent-presets 目录）。
+    // 这里把包内 preset 的 composition 以代码形式注册到 agentPresets registry，
+    // 使 runWorker 里的 agentPresets.mount() 能找到 gitee-worker / gitee-scanner。
+    // 同时保留上方 ensurePreset() 的目录落盘，兼容旧版 DSH 的目录扫描机制。
+    async function registerWorkerPresets() {
+      if (typeof agentPresets.register !== "function") return;
+      const isWin = typeof process !== "undefined" && process.platform === "win32";
+      const defs = [
+        {
+          id: "gitee-worker",
+          name: "Gitee AI 员工 (Worker)",
+          description: "Gitee AI 员工工作 Agent 预设：由 Gitee AI 员工桥接插件动态挂载，负责在克隆的仓库内完成开发/修复/验证并提交推送。请勿手动单独挂载。",
+          order: 90,
+          plugins: [
+            { id: "persona", name: "@deepseek-ai/dsh-persona", config: { prefix: `You are an autonomous AI software engineer (AI 员工) running on a DeepSeek Harness server. Your current working directory \`{{cwd}}\` is a git working tree cloned from a remote Gitee repository. Your job is to fully complete the task you are given: understand the problem, implement the fix or feature in the repository, validate it (run tests/build/checks), commit your work, and push it to the remote feature branch that is already checked out for you. Work autonomously and do not stop to ask questions; if something is genuinely impossible, complete as much as you can and clearly report what blocked you and why. Always verify before you commit: run the relevant tests or at least a syntax/build check. Follow the repository's existing conventions, style, and structure. Keep commits focused and use a clear commit message that references the issue (e.g. "fix #12: ...").` } },
+            { id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash", disabled: isWin },
+            { id: "tool-pwsh", name: "@deepseek-ai/dsh-tool-pwsh", disabled: !isWin },
+            { id: "tool-fs", name: "@deepseek-ai/dsh-tool-fs" },
+            { id: "tool-fs-search", name: "@deepseek-ai/dsh-tool-fs-search", config: { sampleOverCapGlobResults: true } },
+            { id: "tool-str-replace-editor", name: "@deepseek-ai/dsh-tool-str-replace-editor" },
+            { id: "tool-todo", name: "@deepseek-ai/dsh-tool-todo", config: { allowParallelInProgress: true } },
+            { id: "tool-jobs", name: "@deepseek-ai/dsh-tool-jobs" },
+            { id: "tool-web", name: "@deepseek-ai/dsh-tool-web", config: { fetch: false, searchTimeoutMs: 60000 } },
+          ],
+        },
+        {
+          id: "gitee-scanner",
+          name: "Gitee AI 员工 (安全扫描)",
+          description: "Gitee AI 员工代码安全扫描 Agent 预设：由 Gitee AI 员工插件（v1.2+）动态挂载，对克隆的仓库做静态安全审计并按结构化结果写回。请勿手动单独挂载。",
+          order: 91,
+          plugins: [
+            { id: "persona", name: "@deepseek-ai/dsh-persona", config: { prefix: `You are a meticulous senior security code auditor running on a DeepSeek Harness server. Your current working directory \`{{cwd}}\` is a git working tree of a remote repository that has been cloned for YOU TO REVIEW ONLY. Your job is strict static security analysis: find real, reachable vulnerabilities per the audit prompts you are given, be precise about file and line, and avoid false positives and style nitpicks. You must NEVER modify repository files (except the designated scan result file), never git add/commit/push, and never touch git state. When you find a hardcoded secret, describe its type and location but never paste its full value. Follow the output schema in your task exactly and write the structured result file as instructed.` } },
+            { id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash", disabled: isWin },
+            { id: "tool-pwsh", name: "@deepseek-ai/dsh-tool-pwsh", disabled: !isWin },
+            { id: "tool-fs", name: "@deepseek-ai/dsh-tool-fs" },
+            { id: "tool-fs-search", name: "@deepseek-ai/dsh-tool-fs-search", config: { sampleOverCapGlobResults: true } },
+            { id: "tool-str-replace-editor", name: "@deepseek-ai/dsh-tool-str-replace-editor" },
+            { id: "tool-todo", name: "@deepseek-ai/dsh-tool-todo", config: { allowParallelInProgress: true } },
+            { id: "tool-jobs", name: "@deepseek-ai/dsh-tool-jobs" },
+          ],
+        },
+      ];
+      for (const def of defs) {
+        try {
+          await agentPresets.register(def);
+          console.log("[gitee-ai] preset registered: " + def.id);
+        } catch (e) {
+          console.error("[gitee-ai] preset register failed (" + def.id + "):", String((e && e.message) || e));
+        }
       }
     }
 
@@ -265,7 +329,7 @@ export default {
         ...(timeoutMs ? { timeoutMs } : {}),
         sandboxPolicy: { mode: "danger-full-access" },
       });
-      return await shell.run(spec);
+      return await (await shell.execute(spec)).result();
     }
 
     function parseForm(raw) {

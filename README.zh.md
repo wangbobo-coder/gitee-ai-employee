@@ -123,9 +123,25 @@ http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&numbe
 - `dsh/index.js` — 宿主插件（标准 Cordis 对象插件，声明 `dsh.bundle` manifest）。
 - `dsh/client.js` — Web 客户端半体（设置卡片/状态展示）。
 - `preset/gitee-worker/` — 内置 worker agent 预设（issue 开发），首次加载缺失时自动复制到
-  `$DSH_HOME/.agent-presets/gitee-worker`。
+  `$DSH_HOME/.agent-presets/gitee-worker`；若包内版本与已落盘版本不一致会自动刷新覆盖。
 - `preset/gitee-scanner/` — 内置安全扫描 agent 预设（v1.2），自动安装到
   `$DSH_HOME/.agent-presets/gitee-scanner`。
+
+## DSH 版本兼容（v1.3.1）
+
+v1.3.1 修复了在 DSH 0.2.x（当前桌面版）上「插件加载正常但 worker/扫描全部失败」的问题，
+三处都是对宿主 API 变更的跟进：
+
+- **shell 执行**：0.2.x 的 `shell` 服务已移除 `run()`，改为
+  `shell.execute(shell.resolve(req)).result()`；旧代码会抛 `shell.run is not a function`。
+- **agent 预设注册**：0.2.x 的 `agentPresets` 只认显式 `register(definition)`，不再扫描
+  `$DSH_HOME/.agent-presets` 目录；旧代码会抛 `Unknown agent preset: gitee-scanner`。
+  插件现在同时做两件事：代码内 `register()` 注册 + 目录落盘（兼容更老版本）。
+- **persona 配置字段**：`@deepseek-ai/dsh-persona` 的正文配置项是 `prefix`（必填），
+  不是 `text`；用 `text` 会抛 `$.prefix missing required value`。
+
+升级后需要**重启 DSH 进程**：该插件以 npm 包形式安装，运行中的进程不会重新 import
+磁盘上的新代码（仅切换插件开关不足以让 node 重新加载该模块）。
 
 ## License
 

@@ -16,7 +16,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are a meticulous senior security code auditor running on a DeepSeek Harness server.
       Your current working directory `{{cwd}}` is a git working tree of a remote repository
       that has been cloned for YOU TO REVIEW ONLY. Your job is strict static security analysis:
