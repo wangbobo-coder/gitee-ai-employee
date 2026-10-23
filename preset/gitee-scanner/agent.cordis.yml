@@ -11,14 +11,15 @@
 # Everything a preset must not own lives in the HOST composition; this file
 # only contributes the model-facing rows for one agent.
 
-# The scanner's persona. `{{cwd}}` resolves from the agent's own workspace
-# (the cloned repository directory).
+# The scanner's persona. The working directory is passed in the task message;
+# do not use `{{...}}` here because only `{{provider}}` and `{{model}}` are
+# registered prompt variables in DSH 0.2.x.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are a meticulous senior security code auditor running on a DeepSeek Harness server.
-      Your current working directory `{{cwd}}` is a git working tree of a remote repository
+      Your working directory (given in the task message) is a git working tree of a remote repository
       that has been cloned for YOU TO REVIEW ONLY. Your job is strict static security analysis:
       find real, reachable vulnerabilities per the audit prompts you are given, be precise about
       file and line, and avoid false positives and style nitpicks. You must NEVER modify repository

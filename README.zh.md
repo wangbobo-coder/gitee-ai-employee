@@ -123,9 +123,52 @@ http://<dsh-host>:<port>/gitee-ai/go?platform=github&owner=octo&repo=hello&numbe
 - `dsh/index.js` — 宿主插件（标准 Cordis 对象插件，声明 `dsh.bundle` manifest）。
 - `dsh/client.js` — Web 客户端半体（设置卡片/状态展示）。
 - `preset/gitee-worker/` — 内置 worker agent 预设（issue 开发），首次加载缺失时自动复制到
-  `$DSH_HOME/.agent-presets/gitee-worker`。
+  `$DSH_HOME/.agent-presets/gitee-worker`；若包内版本与已落盘版本不一致会自动刷新覆盖。
 - `preset/gitee-scanner/` — 内置安全扫描 agent 预设（v1.2），自动安装到
   `$DSH_HOME/.agent-presets/gitee-scanner`。
+
+## DSH 版本兼容（v1.3.1）
+
+v1.3.1 修复了在 DSH 0.2.x（当前桌面版）上「插件加载正常但 worker/扫描全部失败」的问题，
+三处都是对宿主 API 变更的跟进：
+
+- **shell 执行**：0.2.x 的 `shell` 服务已移除 `run()`，改为
+  `shell.execute(shell.resolve(req)).result()`；旧代码会抛 `shell.run is not a function`。
+- **agent 预设注册**：0.2.x 的 `agentPresets` 只认显式 `register(definition)`，不再扫描
+  `$DSH_HOME/.agent-presets` 目录；旧代码会抛 `Unknown agent preset: gitee-scanner`。
+  插件现在同时做两件事：代码内 `register()` 注册 + 目录落盘（兼容更老版本）。
+- **persona 配置字段**：`@deepseek-ai/dsh-persona` 的正文配置项是 `prefix`（必填），
+  不是 `text`；用 `text` 会抛 `$.prefix missing required value`。
+
+升级后需要**重启 DSH 进程**：该插件以 npm 包形式安装，运行中的进程不会重新 import
+磁盘上的新代码（仅切换插件开关不足以让 node 重新加载该模块）。
+
+## 密钥不再写入 patch（v1.3.2）
+
+v1.3.2 之前，保存设置页会把**完整配置**（含 token）序列化写进安装包内的
+`cordis.patch.yml`，等于把明文 Gitee token 存进一个会随包复制、可能被提交进仓库的文件。
+
+v1.3.2 起，密钥字段（`giteeToken`、`githubToken`、`webhookSecret`）交给宿主的
+credentials 服务保管：
+
+- **存储位置**：`$DSH_HOME/.credentials.yaml`（仅所有者可读，由 DSH 写入），引用名分别是
+  `GITEE_TOKEN`、`GITHUB_TOKEN`、`GITEE_WEBHOOK_SECRET`。
+- **加载时**：插件解析这些引用，因此同名环境变量同样生效——provider 存储优先，环境变量兜底。
+- **保存时**：patch 里这些字段一律写空串，文件可安全复制、提交、随包分发。
+
+若宿主没有 credentials 服务（极简环境），插件仍可工作，但密钥只存在内存中，重启后需要
+重新填写，日志里会有明确警告。
+
+已有安装升级后：在设置页重新填一次 token（或设置 `GITEE_TOKEN` 环境变量）即可。patch 里
+的旧明文会在下次保存时被清空；想立刻清除，直接编辑该 patch 把字段改成 `""`。
+
+v1.3.2 同时包含：
+
+- `summarizeAgent` 改用 `session.snapshotEvents(fromSeq)` 读取事件——0.2.x 的 Session 不再
+  暴露可迭代的 `events` 数组，旧代码导致每次扫描都报 `agent.session.events is not iterable`。
+- 内置 persona 不再使用 `{{cwd}}`。0.2.x 只注册了 `{{provider}}` 与 `{{model}}` 两个提示词
+  变量，其它写法会抛 `unknown prompt variable "{{cwd}}"`。
+- `ensurePreset` 会覆盖已落盘的旧预设，而不是「目录存在即视为最新」。
 
 ## License
 

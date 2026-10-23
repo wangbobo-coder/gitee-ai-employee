@@ -17,7 +17,7 @@
 import { Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import yaml from "yaml";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -159,7 +159,7 @@ export default {
   // ctx.get() 兜底读取（缺失时相应能力自动降级，插件仍可加载）。
   inject: ["agents", "agentPresets", "shell", "timer"],
 
-  apply(ctx, rawConfig) {
+  async apply(ctx, rawConfig) {
     // runtime.callback(ctx, config)：配置作为第二个参数传入（不是 ctx.config）
     const config = { ...DEFAULT_CONFIG, ...(rawConfig || ctx.config || {}) };
     // scanPrompts 归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态
@@ -177,8 +177,71 @@ export default {
     let webServer = ctx.get("webServer");
     const shell = ctx.shell;
     const timer = ctx.timer;
+    // ── 机密字段（v1.3.2）：不再明文写进 patch ─────────────────────────────
+    // secret 值只保留在内存里，持久层交给 DSH 原生 credentials 服务
+    // （$DSH_HOME/.credentials.yaml，权限 0600），并支持同名环境变量兜底。
+    // patch 里这些字段一律写空串，避免 token 随包/随 profile 被复制或提交。
+    const SECRET_FIELDS = {
+      giteeToken: "GITEE_TOKEN",
+      githubToken: "GITHUB_TOKEN",
+      webhookSecret: "GITEE_WEBHOOK_SECRET",
+    };
+    let credentials = typeof ctx.get === "function" ? ctx.get("credentials") : undefined;
+    async function hydrateSecrets() {
+      if (!credentials || typeof credentials.resolve !== "function") {
+        const present = Object.keys(SECRET_FIELDS).filter((k) => config[k]);
+        if (present.length) {
+          console.log("[gitee-ai] credentials service unavailable; " + present.join(", ") + " kept in memory only (restart requires re-entry)");
+        }
+        return;
+      }
+      for (const [field, ref] of Object.entries(SECRET_FIELDS)) {
+        try {
+          const got = await credentials.resolve(ref);
+          if (got && typeof got.value === "string" && got.value.trim() !== "") {
+            config[field] = got.value.trim();
+            console.log("[gitee-ai] secret " + field + " <- credentials:" + ref + " (" + got.source + ")");
+          }
+        } catch (e) {
+          console.error("[gitee-ai] resolve credential " + ref + " failed: " + String((e && e.message) || e));
+        }
+      }
+    }
+    async function persistSecret(field, value) {
+      const v = typeof value === "string" ? value.trim() : "";
+      if (!v) return;
+      if (!credentials || typeof credentials.set !== "function") {
+        console.log("[gitee-ai] credentials service unavailable; " + field + " stays in memory and will be lost on restart");
+        return;
+      }
+      try {
+        await credentials.set(SECRET_FIELDS[field], v);
+        console.log("[gitee-ai] secret " + field + " stored in $DSH_HOME/.credentials.yaml as " + SECRET_FIELDS[field]);
+      } catch (e) {
+        console.error("[gitee-ai] store credential " + SECRET_FIELDS[field] + " failed: " + String((e && e.message) || e));
+      }
+    }
+    // 写盘前把 secret 字段替换成空串（缺失的 key 保持缺失）。
+    function maskedConfig(cfg) {
+      const out = { ...cfg };
+      for (const field of Object.keys(SECRET_FIELDS)) {
+        if (field in out) out[field] = "";
+      }
+      return out;
+    }
+    await hydrateSecrets();
+    // credentials 若在 apply 时尚未就绪：等服务出现后再补读一次（机制同 settings/webServer）。
+    if (!credentials) {
+      ctx.inject(["credentials"], async (cctx) => {
+        credentials = (cctx && typeof cctx.get === "function" ? cctx.get("credentials") : undefined) || credentials;
+        if (!credentials) return;
+        try { await hydrateSecrets(); }
+        catch (e) { console.error("[gitee-ai] late credential hydration failed: " + String((e && e.message) || e)); }
+      });
+    }
     console.log("[gitee-ai] plugin v" + PLUGIN_VERSION + " loaded | " + ((typeof process !== "undefined" && process.platform) || "?") + " | node " + ((typeof process !== "undefined" && process.version) || "?"));
     ensureWorkerPreset();
+    await registerWorkerPresets();
 
     // ── 提示词归一化：兼容 {id:{name,prompt}} 与 [{id,name,prompt}] 两种形态 ──
     function toPromptMap(v) {
@@ -207,8 +270,9 @@ export default {
     // 永远不会被该页派发 —— 旧版桌面端有另一种列表机制，故当时能显示、这里不能。
     ctx.inject(["settings"], (sctx) => {
       try {
-        // base 里剔除 schema 未声明的自由格式字段（scanPrompts），避免校验报错
-        const baseCfg = Object.assign({}, config);
+        // base 里剔除 schema 未声明的自由格式字段（scanPrompts），避免校验报错；
+        // 机密字段置空，避免 settings 文档把明文 token 另存一份。
+        const baseCfg = maskedConfig(config);
         delete baseCfg.scanPrompts;
         sctx.settings.register("gitee-ai-employee", GITEE_CONFIG_SCHEMA, { base: baseCfg });
         console.log("[gitee-ai] settings namespace 'gitee-ai-employee' registered (settings card enabled)");
@@ -238,22 +302,85 @@ export default {
       try {
         const presetDir = join(process.env.DSH_HOME || join(homedir(), ".dsh"), ".agent-presets", presetId);
         const target = join(presetDir, "agent.cordis.yml");
-        if (existsSync(target)) {
-          console.log("[gitee-ai] preset already present: " + presetDir);
-          return;
-        }
         const src = fileURLToPath(new URL("../preset/" + presetId + "/agent.cordis.yml", import.meta.url));
         if (!existsSync(src)) {
           console.error("[gitee-ai] bundled preset missing: " + src);
           return;
         }
+        const srcText = readFileSync(src, "utf8");
+        // 已落盘但内容与包内不一致（插件升级后 preset 有变更）时刷新覆盖，
+        // 否则老用户会永远停留在首次安装时的旧 preset 上。
+        if (existsSync(target)) {
+          const cur = readFileSync(target, "utf8");
+          if (cur === srcText) {
+            console.log("[gitee-ai] preset already present: " + presetDir);
+            return;
+          }
+          writeFileSync(target, srcText);
+          const srcMetaUpd = fileURLToPath(new URL("../preset/" + presetId + "/preset.yml", import.meta.url));
+          if (existsSync(srcMetaUpd)) writeFileSync(join(presetDir, "preset.yml"), readFileSync(srcMetaUpd, "utf8"));
+          console.log("[gitee-ai] preset refreshed -> " + presetDir);
+          return;
+        }
         mkdirSync(presetDir, { recursive: true });
-        copyFileSync(src, target);
+        writeFileSync(target, srcText);
         const srcMeta = fileURLToPath(new URL("../preset/" + presetId + "/preset.yml", import.meta.url));
-        if (existsSync(srcMeta)) copyFileSync(srcMeta, join(presetDir, "preset.yml"));
+        if (existsSync(srcMeta)) writeFileSync(join(presetDir, "preset.yml"), readFileSync(srcMeta, "utf8"));
         console.log("[gitee-ai] preset installed -> " + presetDir);
       } catch (e) {
         console.error("[gitee-ai] ensurePreset error (" + presetId + "):", String((e && e.message) || e));
+      }
+    }
+
+    // ── DSH 0.2.x：agentPresets 改为显式 register() 注册（不再扫描 .agent-presets 目录）。
+    // 这里把包内 preset 的 composition 以代码形式注册到 agentPresets registry，
+    // 使 runWorker 里的 agentPresets.mount() 能找到 gitee-worker / gitee-scanner。
+    // 同时保留上方 ensurePreset() 的目录落盘，兼容旧版 DSH 的目录扫描机制。
+    async function registerWorkerPresets() {
+      if (typeof agentPresets.register !== "function") return;
+      const isWin = typeof process !== "undefined" && process.platform === "win32";
+      const defs = [
+        {
+          id: "gitee-worker",
+          name: "Gitee AI 员工 (Worker)",
+          description: "Gitee AI 员工工作 Agent 预设：由 Gitee AI 员工桥接插件动态挂载，负责在克隆的仓库内完成开发/修复/验证并提交推送。请勿手动单独挂载。",
+          order: 90,
+          plugins: [
+            { id: "persona", name: "@deepseek-ai/dsh-persona", config: { prefix: `You are an autonomous AI software engineer (AI 员工) running on a DeepSeek Harness server. Your working directory (given in the task message) is a git working tree cloned from a remote Gitee repository. Your job is to fully complete the task you are given: understand the problem, implement the fix or feature in the repository, validate it (run tests/build/checks), commit your work, and push it to the remote feature branch that is already checked out for you. Work autonomously and do not stop to ask questions; if something is genuinely impossible, complete as much as you can and clearly report what blocked you and why. Always verify before you commit: run the relevant tests or at least a syntax/build check. Follow the repository's existing conventions, style, and structure. Keep commits focused and use a clear commit message that references the issue (e.g. "fix #12: ...").` } },
+            { id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash", disabled: isWin },
+            { id: "tool-pwsh", name: "@deepseek-ai/dsh-tool-pwsh", disabled: !isWin },
+            { id: "tool-fs", name: "@deepseek-ai/dsh-tool-fs" },
+            { id: "tool-fs-search", name: "@deepseek-ai/dsh-tool-fs-search", config: { sampleOverCapGlobResults: true } },
+            { id: "tool-str-replace-editor", name: "@deepseek-ai/dsh-tool-str-replace-editor" },
+            { id: "tool-todo", name: "@deepseek-ai/dsh-tool-todo", config: { allowParallelInProgress: true } },
+            { id: "tool-jobs", name: "@deepseek-ai/dsh-tool-jobs" },
+            { id: "tool-web", name: "@deepseek-ai/dsh-tool-web", config: { fetch: false, searchTimeoutMs: 60000 } },
+          ],
+        },
+        {
+          id: "gitee-scanner",
+          name: "Gitee AI 员工 (安全扫描)",
+          description: "Gitee AI 员工代码安全扫描 Agent 预设：由 Gitee AI 员工插件（v1.2+）动态挂载，对克隆的仓库做静态安全审计并按结构化结果写回。请勿手动单独挂载。",
+          order: 91,
+          plugins: [
+            { id: "persona", name: "@deepseek-ai/dsh-persona", config: { prefix: `You are a meticulous senior security code auditor running on a DeepSeek Harness server. Your working directory (given in the task message) is a git working tree of a remote repository cloned for YOU TO REVIEW ONLY. Your job is strict static security analysis: find real, reachable vulnerabilities per the audit prompts you are given, be precise about file and line, and avoid false positives and style nitpicks. You must NEVER modify repository files (except the designated scan result file), never git add/commit/push, and never touch git state. When you find a hardcoded secret, describe its type and location but never paste its full value. Follow the output schema in your task exactly and write the structured result file as instructed.` } },
+            { id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash", disabled: isWin },
+            { id: "tool-pwsh", name: "@deepseek-ai/dsh-tool-pwsh", disabled: !isWin },
+            { id: "tool-fs", name: "@deepseek-ai/dsh-tool-fs" },
+            { id: "tool-fs-search", name: "@deepseek-ai/dsh-tool-fs-search", config: { sampleOverCapGlobResults: true } },
+            { id: "tool-str-replace-editor", name: "@deepseek-ai/dsh-tool-str-replace-editor" },
+            { id: "tool-todo", name: "@deepseek-ai/dsh-tool-todo", config: { allowParallelInProgress: true } },
+            { id: "tool-jobs", name: "@deepseek-ai/dsh-tool-jobs" },
+          ],
+        },
+      ];
+      for (const def of defs) {
+        try {
+          await agentPresets.register(def);
+          console.log("[gitee-ai] preset registered: " + def.id);
+        } catch (e) {
+          console.error("[gitee-ai] preset register failed (" + def.id + "):", String((e && e.message) || e));
+        }
       }
     }
 
@@ -265,7 +392,7 @@ export default {
         ...(timeoutMs ? { timeoutMs } : {}),
         sandboxPolicy: { mode: "danger-full-access" },
       });
-      return await shell.run(spec);
+      return await (await shell.execute(spec)).result();
     }
 
     function parseForm(raw) {
@@ -550,7 +677,11 @@ export default {
       let reason;
       let completed = false;
       let errorMsg = "";
-      for (const event of agent.session.events) {
+      // DSH 0.2.x：Session 不再暴露可迭代的 `events` 数组，改为 snapshotEvents(fromSeq)。
+      const events = typeof agent.session.snapshotEvents === "function"
+        ? agent.session.snapshotEvents(firstSeq)
+        : [];
+      for (const event of events) {
         if (event.seq < firstSeq) continue;
         if (event.type === "turn/start") { started = true; continue; }
         if (!started) continue;
@@ -1235,7 +1366,9 @@ export default {
       try { paths.push(fileURLToPath(new URL("../../../vendor/gitee-ai-employee/cordis.patch.yml", import.meta.url))); } catch (e) {}
       return paths.filter((p) => p && existsSync(p));
     }
-    async function saveConfigToPatch(nextConfig) {
+    async function saveConfigToPatch(rawNextConfig) {
+      // v1.3.2：机密字段不落 patch（只写空串），真实值由 credentials 服务保存。
+      const nextConfig = maskedConfig(rawNextConfig);
       const paths = patchFilePaths();
       if (!paths.length) throw new Error("cannot locate cordis.patch.yml");
       const written = [];
@@ -1443,6 +1576,10 @@ ${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}"
               }
             } catch (e) { /* 提示词解析失败则保持原值 */ }
           }
+          // 机密字段先进 credentials 存储（patch 只留空串）
+          await persistSecret("giteeToken", next.giteeToken);
+          await persistSecret("githubToken", next.githubToken);
+          await persistSecret("webhookSecret", next.webhookSecret);
           const p = await saveConfigToPatch(next);
           // 内存中立即更新（本进程生效），并重启轮询
           config.giteeToken = next.giteeToken;
@@ -1842,6 +1979,8 @@ ${["critical", "high", "medium", "low", "none"].map((s) => `<option value="${s}"
               if (body.scanIntervalMs !== undefined) next.scanIntervalMs = Number(body.scanIntervalMs) || next.scanIntervalMs;
               if (body.scanTimeoutMs !== undefined) next.scanTimeoutMs = Number(body.scanTimeoutMs) || next.scanTimeoutMs;
               if (body.scanConcurrency !== undefined) next.scanConcurrency = Math.min(Math.max(Number(body.scanConcurrency) || 3, 1), 8);
+              await persistSecret("giteeToken", next.giteeToken);
+              await persistSecret("githubToken", next.githubToken);
               const savedTo = await saveConfigToPatch(next);
               Object.assign(config, next);
               restartPolling();
