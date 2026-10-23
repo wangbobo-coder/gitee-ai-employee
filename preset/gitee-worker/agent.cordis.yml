@@ -11,14 +11,15 @@
 # `standard` preset for the full rationale): this file only contributes the
 # model-facing rows for one agent.
 
-# The worker's persona. `{{model}}` and `{{cwd}}` resolve from the agent's own
-# route and workspace (the cloned repo directory).
+# The worker's persona. The working directory is passed in the task message;
+# do not use `{{...}}` here because only `{{provider}}` and `{{model}}` are
+# registered prompt variables in DSH 0.2.x.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: >-
       You are an autonomous AI software engineer (AI 员工) running on a DeepSeek Harness server.
-      Your current working directory `{{cwd}}` is a git working tree cloned from a remote Gitee
+      Your working directory (given in the task message) is a git working tree cloned from a remote Gitee
       repository. Your job is to fully complete the task you are given: understand the problem,
       implement the fix or feature in the repository, validate it (run tests/build/checks), commit
       your work, and push it to the remote feature branch that is already checked out for you.

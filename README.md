@@ -157,6 +157,41 @@ After upgrading, **restart the DSH process**. The plugin is installed as an npm 
 a running process never re-imports new code from disk — toggling the plugin on/off is not
 enough.
 
+## Secrets are no longer written to the patch (v1.3.2)
+
+Before v1.3.2, saving the settings page serialized the *whole* config — tokens included —
+into `cordis.patch.yml` inside the installed package. That put a plaintext Gitee token in a
+file that is copied around with the package and can end up in a repository.
+
+From v1.3.2 the secret fields (`giteeToken`, `githubToken`, `webhookSecret`) are handled by
+the host credentials service instead:
+
+- **Storage**: the value lives in `$DSH_HOME/.credentials.yaml` (owner-only, written by
+  DSH), under the refs `GITEE_TOKEN`, `GITHUB_TOKEN`, `GITEE_WEBHOOK_SECRET`.
+- **On load**: the plugin resolves those refs, so an env var of the same name also works —
+  the provider store wins, the environment is the fallback.
+- **On save**: the patch always receives an empty string for these fields. The patch stays
+  safe to copy, commit, and ship.
+
+If the credentials service is unavailable (a minimal host without it), the plugin still
+works but keeps secrets in memory only — they must be re-entered after a restart, and it
+logs a warning saying so.
+
+Existing installs: after upgrading, re-enter the token once in the settings page (or set
+`GITEE_TOKEN` in the environment). The old plaintext value in the patch is blanked on the
+next save; if you want it gone immediately, edit the patch and set the field to `""`.
+
+Also part of v1.3.2:
+
+- `summarizeAgent` reads events through `session.snapshotEvents(fromSeq)` — 0.2.x sessions
+  no longer expose an iterable `events` array, which made every scan report
+  `agent.session.events is not iterable`.
+- The bundled persona no longer uses `{{cwd}}`. Only `{{provider}}` and `{{model}}` are
+  registered prompt variables in 0.2.x; anything else throws
+  `unknown prompt variable "{{cwd}}"`.
+- `ensurePreset` overwrites a stale on-disk preset instead of treating its presence as
+  "already up to date".
+
 ## License
 
 MIT

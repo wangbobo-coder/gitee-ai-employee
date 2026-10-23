@@ -143,6 +143,33 @@ v1.3.1 修复了在 DSH 0.2.x（当前桌面版）上「插件加载正常但 wo
 升级后需要**重启 DSH 进程**：该插件以 npm 包形式安装，运行中的进程不会重新 import
 磁盘上的新代码（仅切换插件开关不足以让 node 重新加载该模块）。
 
+## 密钥不再写入 patch（v1.3.2）
+
+v1.3.2 之前，保存设置页会把**完整配置**（含 token）序列化写进安装包内的
+`cordis.patch.yml`，等于把明文 Gitee token 存进一个会随包复制、可能被提交进仓库的文件。
+
+v1.3.2 起，密钥字段（`giteeToken`、`githubToken`、`webhookSecret`）交给宿主的
+credentials 服务保管：
+
+- **存储位置**：`$DSH_HOME/.credentials.yaml`（仅所有者可读，由 DSH 写入），引用名分别是
+  `GITEE_TOKEN`、`GITHUB_TOKEN`、`GITEE_WEBHOOK_SECRET`。
+- **加载时**：插件解析这些引用，因此同名环境变量同样生效——provider 存储优先，环境变量兜底。
+- **保存时**：patch 里这些字段一律写空串，文件可安全复制、提交、随包分发。
+
+若宿主没有 credentials 服务（极简环境），插件仍可工作，但密钥只存在内存中，重启后需要
+重新填写，日志里会有明确警告。
+
+已有安装升级后：在设置页重新填一次 token（或设置 `GITEE_TOKEN` 环境变量）即可。patch 里
+的旧明文会在下次保存时被清空；想立刻清除，直接编辑该 patch 把字段改成 `""`。
+
+v1.3.2 同时包含：
+
+- `summarizeAgent` 改用 `session.snapshotEvents(fromSeq)` 读取事件——0.2.x 的 Session 不再
+  暴露可迭代的 `events` 数组，旧代码导致每次扫描都报 `agent.session.events is not iterable`。
+- 内置 persona 不再使用 `{{cwd}}`。0.2.x 只注册了 `{{provider}}` 与 `{{model}}` 两个提示词
+  变量，其它写法会抛 `unknown prompt variable "{{cwd}}"`。
+- `ensurePreset` 会覆盖已落盘的旧预设，而不是「目录存在即视为最新」。
+
 ## License
 
 MIT
